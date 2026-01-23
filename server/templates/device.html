@@ -1,0 +1,78 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Device {{ device.username }}</title>
+    <script src="https://unpkg.com/htmx.org@1.9.12"></script>
+  </head>
+  <body>
+    <p><a href="/">← Back</a></p>
+
+    <h1>Device: {{ device.username }}</h1>
+
+    <ul>
+      <li><b>Status:</b> {% if device.online %}Online{% else %}Offline{% endif %}</li>
+      <li><b>Device name:</b> {{ device.device_name }}</li>
+      <li><b>Version:</b> {{ device.version }}</li>
+      <li><b>Device ID:</b> <code>{{ device.device_id }}</code></li>
+      <li><b>Last seen:</b> {{ device.last_seen }}</li>
+    </ul>
+
+    <h2>Send Message</h2>
+
+    <form
+      hx-post="/device/{{ device.device_id }}/message"
+      hx-target="#send-result"
+      hx-swap="innerHTML"
+    >
+      <p>
+        <label>Title<br />
+          <input name="title" required />
+        </label>
+      </p>
+
+      <p>
+        <label>Body<br />
+          <textarea name="body" rows="4" required></textarea>
+        </label>
+      </p>
+
+      <p>
+        <label>Level<br />
+          <select name="level">
+            <option value="info" selected>info</option>
+            <option value="warning">warning</option>
+            <option value="error">error</option>
+          </select>
+        </label>
+      </p>
+
+      <button type="submit">Send</button>
+    </form>
+
+    <div id="send-result" style="margin-top: 10px;"></div>
+
+
+    <h2>Recent Logs</h2>
+    <table border="1" cellpadding="6" cellspacing="0">
+      <thead>
+        <tr>
+          <th>ts</th>
+          <th>event</th>
+          <th>command_id</th>
+          <th>detail</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for l in logs %}
+        <tr>
+          <td>{{ l.ts }}</td>
+          <td>{{ l.event }}</td>
+          <td><code>{{ l.command_id }}</code></td>
+          <td>{{ l.detail }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </body>
+</html>
