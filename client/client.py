@@ -9,6 +9,7 @@ import argparse
 import logging
 from logging.handlers import RotatingFileHandler
 import time
+from urllib.parse import urlparse
 
 import websockets
 import tkinter as tk
@@ -22,11 +23,14 @@ CONFIG_PATH = CONFIG_DIR / "config.json"
 LOG_DIR = CONFIG_DIR / "logs"
 LOG_PATH = LOG_DIR / "client.log"
 
+
+
 @dataclass
 class ClientConfig:
     device_id: str
     username: str
-    server_url: str
+    server_base_url: str          # e.g. "wss://lmi.<DOMAIN>.com/ws"
+    device_token: str | None = None
 
 def load_config() -> ClientConfig | None:
     if not CONFIG_PATH.exists():
@@ -35,14 +39,20 @@ def load_config() -> ClientConfig | None:
     with CONFIG_PATH.open("r", encoding="utf-8") as f:
         data = json.load(f)
 
-    return ClientConfig(**data)
+    # New format
+    if "server_base_url" in data:
+        return ClientConfig(**data)
+
+    # Unknown config format
+    return None
+
 
 
 def save_config(cfg: ClientConfig) -> None:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-
     with CONFIG_PATH.open("w", encoding="utf-8") as f:
         json.dump(asdict(cfg), f, indent=2)
+
 
 def build_hello(cfg) -> dict:
     return {
@@ -61,7 +71,7 @@ async def send_ack(ws, command_id: str, status: str, detail: str = "") -> None:
         "detail": detail,
     }
     await ws.send(json.dumps(payload))
-    logging.info("Ack sent id=%s status=%s", command_id, "ok")
+    logging.info("Ack sent id=%s status=%s", command_id, status)
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -82,6 +92,30 @@ async def heartbeat_loop(ws, interval_s: int = 25) -> None:
         except Exception as e:
             logging.warning("Heartbeat failed: %r", e)
             return
+
+def prompt_enroll_code() -> str | None:
+    root = tk.Tk()
+    root.withdraw()
+
+    code = simpledialog.askstring(
+        "Let Mommy In~",
+        "Type in Mommy's special passcode~  If you don't have one, message Mommy~",
+        parent=root,
+    )
+
+    root.destroy()
+
+    if not code:
+        return None
+
+    return code.strip()
+
+def get_enroll_code_or_exit() -> str:
+    code = prompt_enroll_code()
+    if not code:
+        logging.error("Enrollment cancelled by user.")
+        raise SystemExit(1)
+    return code
 
 
 def prompt_username() -> str:
@@ -111,16 +145,27 @@ def first_run_setup() -> ClientConfig:
     username = prompt_username()
     device_id = str(uuid.uuid4())
 
-    server_url = "ws://127.0.0.1:8000/ws"  # local dev default
+    server_base_url = "ws://127.0.0.1:8000/ws"
 
     cfg = ClientConfig(
         device_id=device_id,
         username=username,
-        server_url=server_url,
+        server_base_url=server_base_url,
+        device_token=None,
     )
 
     save_config(cfg)
     return cfg
+
+def build_ws_url(cfg: ClientConfig, *, enroll_code: str | None = None) -> str:
+    if enroll_code is not None:
+        return f"{cfg.server_base_url}?enroll_code={enroll_code}"
+
+    if cfg.device_token:
+        return f"{cfg.server_base_url}?device_token={cfg.device_token}"
+
+    return cfg.server_base_url
+
 
 def setup_logging() -> None:
     LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -151,10 +196,17 @@ async def run_client(cfg):
     delay = 2  # seconds
     max_delay = 30
 
+    pending_enroll_code: str | None = None
+    
     while True:
         try:
-            logging.info("Connecting to %s ...", cfg.server_url)
-            async with websockets.connect(cfg.server_url) as ws:
+            if not cfg.device_token and pending_enroll_code is None:
+                pending_enroll_code = get_enroll_code_or_exit()
+
+            ws_url = build_ws_url(cfg, enroll_code=pending_enroll_code)
+            logging.info("Connecting to %s ...", ws_url)
+            async with websockets.connect(ws_url) as ws:
+
                 # Reset backoff on successful connect
                 delay = 2
 
@@ -170,6 +222,22 @@ async def run_client(cfg):
                         data = json.loads(raw)
                         
                         cmd_type = data.get("type")
+                        if cmd_type == "enroll_ok":
+                            token = data.get("device_token")
+                            if not token:
+                                logging.error("Enroll_ok missing device_token")
+                                raise SystemExit(1)
+
+                            cfg.device_token = token
+                            save_config(cfg)
+                            logging.info("Enrollment successful; device_token saved.")
+
+                            # Clear pending enroll code so future connections use device_token
+                            pending_enroll_code = None
+                            
+                            # Break out to reconnect using the new token
+                            break
+
                         cmd_id = data.get("id", "-")
                         logging.info("Received command type=%s id=%s", cmd_type, cmd_id)
 
@@ -187,9 +255,13 @@ async def run_client(cfg):
                         pass
 
         except KeyboardInterrupt:
-            logging.info("Connecting to %s ...", cfg.server_url)
+            logging.info("KeyboardInterrupt")
             return
         except Exception as e:
+            # If we're trying to enroll and the connection failed, ask for a new code next time
+            if cfg.device_token is None:
+                pending_enroll_code = None
+
             logging.warning("Connection error: %r", e)
             logging.info("Reconnecting in %s seconds...", delay)
             await asyncio.sleep(delay)
@@ -203,7 +275,10 @@ def main() -> None:
         
     args = parse_args()
     if args.server:
-        cfg.server_url = args.server.strip()
+        parsed = urlparse(args.server.strip())
+        if parsed.query:
+            raise ValueError("--server must not include query parameters")
+        cfg.server_base_url = args.server.strip()
 
 
     device_name = socket.gethostname()
@@ -212,7 +287,7 @@ def main() -> None:
     logging.info("  username:   %s", cfg.username)
     logging.info("  device_id:  %s", cfg.device_id)
     logging.info("  device:     %s", device_name)
-    logging.info("  server_url: %s", cfg.server_url)
+    logging.info("  server_base_url: %s", cfg.server_base_url)
     logging.info("  config:     %s", CONFIG_PATH)
     logging.info("  log:        %s", LOG_PATH)
     
