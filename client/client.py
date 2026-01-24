@@ -23,8 +23,6 @@ CONFIG_PATH = CONFIG_DIR / "config.json"
 LOG_DIR = CONFIG_DIR / "logs"
 LOG_PATH = LOG_DIR / "client.log"
 
-
-
 @dataclass
 class ClientConfig:
     device_id: str
@@ -145,7 +143,7 @@ def first_run_setup() -> ClientConfig:
     username = prompt_username()
     device_id = str(uuid.uuid4())
 
-    server_base_url = "ws://127.0.0.1:8000/ws"
+    server_base_url = "wss://lmi.letmommyin.com/ws"
 
     cfg = ClientConfig(
         device_id=device_id,
