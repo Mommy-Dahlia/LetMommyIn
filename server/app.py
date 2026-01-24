@@ -85,6 +85,12 @@ def create_enroll_code(ttl_seconds: int = 15 * 60) -> tuple[str, int]:
 
     return raw_code, expires_at
 
+@admin_router.post("/enroll/create")
+def admin_create_enroll_code(ttl_minutes: int = 15):
+    ttl_seconds = ttl_minutes * 60
+    code, expires_at = create_enroll_code(ttl_seconds=ttl_seconds)
+    return {"code": code, "expires_at": expires_at}
+
 
 def consume_enroll_code(raw_code: str) -> bool:
     """
