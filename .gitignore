@@ -1,12 +1,24 @@
 # Python
 __pycache__/
+client/__pycache__/
+server/__pycache__/
 *.pyc
 .venv/
 venv/
 
+#Server database nonsense
+server/lmi.db
+server/lmi.db-shm
+server/lmi.db-wal
+
 # Client runtime files
 client/config.json
 client/logs/
+
+#PyInstaller
+client/dist/
+client/build/
+client/*.spec
 
 # OS
 .DS_Store

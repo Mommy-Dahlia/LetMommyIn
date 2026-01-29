@@ -7,7 +7,6 @@ Created on Wed Jan 21 10:32:03 2026
 
 import json
 import time
-import os
 import uuid
 from dataclasses import dataclass, field
 from typing import Dict
@@ -15,7 +14,7 @@ import sqlite3
 import hashlib
 import secrets
 
-from fastapi import FastAPI, APIRouter, Request, WebSocket, WebSocketDisconnect, HTTPException, Form
+from fastapi import FastAPI, APIRouter, Request, WebSocket, WebSocketDisconnect, HTTPException, Form, UploadFile, File, Body
 from fastapi.responses import HTMLResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -318,18 +317,28 @@ async def send_message_htmx(
     title: str = Form(...),
     body: str = Form(...),
     level: str = Form("info"),
+    lifespan_s: str = Form(""),
 ):
     # If no active websocket, we can't push a command
     if device_id not in hub.connections:
         return PlainTextResponse("Device is offline (no active connection).", status_code=409)
 
     cmd_id = f"cmd_{uuid.uuid4().hex[:10]}"
+    
+    lifespan_s = lifespan_s.strip()
+    lifespan_val: int | None = None
+    if lifespan_s != "":
+        lifespan_val = int(lifespan_s)
+    else:
+        lifespan_val = 8
+
     payload = {
         "type": "show_message",
         "id": cmd_id,
         "title": title,
         "body": body,
         "level": level,
+        "lifespan_s": lifespan_val,
     }
 
     ws = hub.connections[device_id]
@@ -338,6 +347,111 @@ async def send_message_htmx(
     hub.log(device_id, "sent", detail=f"show_message level={level}", command_id=cmd_id)
 
     return PlainTextResponse(f"Sent {cmd_id}")
+
+@app.post("/device/{device_id}/open_url")
+async def open_url_htmx(
+    device_id: str,
+    url: str = Form(...),
+):
+    # If no active websocket, we can't push a command
+    if device_id not in hub.connections:
+        return PlainTextResponse("Device is offline (no active connection).", status_code=409)
+
+    url = url.strip()
+    if not url:
+        return PlainTextResponse("URL is required.", status_code=400)
+
+    cmd_id = f"cmd_{uuid.uuid4().hex[:10]}"
+    payload = {
+        "type": "open_url",
+        "id": cmd_id,
+        "body": url,
+    }
+
+    ws = hub.connections[device_id]
+    await ws.send_text(json.dumps(payload))
+
+    hub.log(device_id, "sent", detail="open_url", command_id=cmd_id)
+
+    return PlainTextResponse(f"Sent {cmd_id}")
+
+@app.post("/device/{device_id}/image_popup")
+async def image_popup_htmx(
+    device_id: str,
+    url: str = Form(...),
+    title: str = Form(""),
+):
+    if device_id not in hub.connections:
+        return PlainTextResponse("Device is offline (no active connection).", status_code=409)
+
+    url = url.strip()
+    if not url:
+        return PlainTextResponse("URL is required.", status_code=400)
+
+    cmd_id = f"cmd_{uuid.uuid4().hex[:10]}"
+    payload = {
+        "type": "image_popup",
+        "id": cmd_id,
+        "body": url,
+    }
+
+    ws = hub.connections[device_id]
+    await ws.send_text(json.dumps(payload))
+
+    hub.log(device_id, "sent", detail="image_popup", command_id=cmd_id)
+
+    return PlainTextResponse(f"Sent {cmd_id}")
+
+@app.post("/device/{device_id}/session/start")
+async def session_start_htmx(
+    device_id: str,
+    session_file: UploadFile = File(...),
+):
+    if device_id not in hub.connections:
+        return PlainTextResponse("Device is offline (no active connection).", status_code=409)
+
+    # Read uploaded file bytes
+    raw = await session_file.read()
+    if not raw:
+        return PlainTextResponse("Session file was empty.", status_code=400)
+
+    # Decode (assume UTF-8 JSON)
+    try:
+        text = raw.decode("utf-8")
+    except Exception:
+        return PlainTextResponse("Session file must be UTF-8 text.", status_code=400)
+
+    try:
+        steps = json.loads(text)
+    except Exception as e:
+        return PlainTextResponse(f"Invalid JSON: {e}", status_code=400)
+
+    if not isinstance(steps, list):
+        return PlainTextResponse("Session JSON must be a JSON list of steps.", status_code=400)
+
+    # Light validation
+    for i, step in enumerate(steps):
+        if not isinstance(step, dict):
+            return PlainTextResponse(f"Step {i} must be an object.", status_code=400)
+        if "type" not in step:
+            return PlainTextResponse(f"Step {i} missing 'type'.", status_code=400)
+
+    cmd_id = f"cmd_{uuid.uuid4().hex[:10]}"
+    session_id = f"sess_{uuid.uuid4().hex[:10]}"
+
+    payload = {
+        "type": "session_start",
+        "id": cmd_id,
+        "session_id": session_id,
+        "body": steps,
+    }
+
+    ws = hub.connections[device_id]
+    await ws.send_text(json.dumps(payload))
+
+    hub.log(device_id, "sent", detail=f"session_start file={session_file.filename} steps={len(steps)}", command_id=cmd_id)
+
+    return PlainTextResponse(f"Sent {cmd_id} session_id={session_id}")
 
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket):

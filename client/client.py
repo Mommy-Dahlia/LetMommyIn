@@ -10,12 +10,15 @@ import logging
 from logging.handlers import RotatingFileHandler
 import time
 from urllib.parse import urlparse
+import queue
 
 import websockets
-import tkinter as tk
-from tkinter import simpledialog, messagebox
+import threading
+from PySide6.QtCore import QObject, Signal
+from PySide6.QtWidgets import QApplication, QInputDialog, QMessageBox
 
-from parser import parse_command
+from session_runner import SessionRunner
+from parser import parse_command, set_session_runner
 
 CONFIG_DIR = Path(os.getenv("APPDATA", ".")) / "LMI"
 CONFIG_PATH = CONFIG_DIR / "config.json"
@@ -44,6 +47,29 @@ def load_config() -> ClientConfig | None:
     # Unknown config format
     return None
 
+class CommandBridge(QObject):
+    command_received = Signal(dict)
+    
+class CommandDispatcher(QObject):
+    def __init__(self, ack_queue: "queue.Queue[dict]"):
+        super().__init__()
+        self.ack_queue = ack_queue
+
+    def handle_command(self, data: dict) -> None:
+        cmd_id = data.get("id", "-")
+        try:
+            parse_command(data)
+        except Exception as e:
+            logging.exception(
+                "Command failed in UI thread id=%s type=%s",
+                cmd_id,
+                data.get("type"),
+            )
+            self.ack_queue.put({
+                "id": cmd_id,
+                "status": "failed",
+                "detail": str(e),
+            })
 
 
 def save_config(cfg: ClientConfig) -> None:
@@ -61,6 +87,15 @@ def build_hello(cfg) -> dict:
         "version": "0.1-prototype",
     }
 
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--server",
+        help="Override server WebSocket URL (e.g. ws://127.0.0.1:8000/ws or wss://example.com/ws)",
+        type=str,
+    )
+    return parser.parse_args()
+
 async def send_ack(ws, command_id: str, status: str, detail: str = "") -> None:
     payload = {
         "type": "ack",
@@ -70,15 +105,18 @@ async def send_ack(ws, command_id: str, status: str, detail: str = "") -> None:
     }
     await ws.send(json.dumps(payload))
     logging.info("Ack sent id=%s status=%s", command_id, status)
-
-def parse_args():
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--server",
-        help="Override server WebSocket URL (e.g. ws://127.0.0.1:8000/ws or wss://example.com/ws)",
-        type=str,
-    )
-    return parser.parse_args()
+    
+async def ack_sender_loop(ws, ack_queue: "queue.Queue[dict]") -> None:
+    """
+    Runs in the asyncio (network) thread. Waits for ack requests from the Qt thread and sends them.
+    """
+    while True:
+        # Block waiting for the next ack request, without blocking the asyncio loop
+        item = await asyncio.to_thread(ack_queue.get)
+        command_id = item.get("id", "-")
+        status = item.get("status", "ack")
+        detail = item.get("detail", "")
+        await send_ack(ws, command_id, status=status, detail=detail)
 
 async def heartbeat_loop(ws, interval_s: int = 25) -> None:
     while True:
@@ -92,21 +130,18 @@ async def heartbeat_loop(ws, interval_s: int = 25) -> None:
             return
 
 def prompt_enroll_code() -> str | None:
-    root = tk.Tk()
-    root.withdraw()
-
-    code = simpledialog.askstring(
-        "Let Mommy In~",
+    code, ok = QInputDialog.getText(
+        None,
+        "Let Mommy In",
         "Type in Mommy's special passcode~  If you don't have one, message Mommy~",
-        parent=root,
     )
 
-    root.destroy()
-
-    if not code:
+    if not ok:
         return None
 
-    return code.strip()
+    code = (code or "").strip()
+    return code if code else None
+
 
 def get_enroll_code_or_exit() -> str:
     code = prompt_enroll_code()
@@ -117,27 +152,22 @@ def get_enroll_code_or_exit() -> str:
 
 
 def prompt_username() -> str:
-    root = tk.Tk()
-    root.withdraw()  # hides the empty root window
-
-    username = simpledialog.askstring(
-        title="Let Mommy In",
-        prompt="Which one of Mommy's sweeties is downloading this~?",
-        parent=root,
+    username, ok = QInputDialog.getText(
+        None,
+        "Let Mommy In",
+        "Which one of Mommy's sweeties is downloading this~?",
     )
 
-    root.destroy()
-
-    if not username or not username.strip():
-        # showerror needs its own root if the original is destroyed,
-        # so we create a tiny one just for this message.
-        err_root = tk.Tk()
-        err_root.withdraw()
-        messagebox.showerror("Setup cancelled", "I need to know who you are, darling~  Try again~")
-        err_root.destroy()
+    if not ok or not username.strip():
+        QMessageBox.critical(
+            None,
+            "Setup cancelled",
+            "I need to know who you are, darling~  Try again~",
+        )
         raise SystemExit(1)
 
     return username.strip()
+
 
 def first_run_setup() -> ClientConfig:
     username = prompt_username()
@@ -189,12 +219,15 @@ def setup_logging() -> None:
 
     logger.addHandler(file_handler)
     logger.addHandler(console_handler)
+    
+def _network_thread_main(cfg: ClientConfig, bridge: CommandBridge, ack_queue: "queue.Queue[dict]", initial_enroll_code) -> None:
+    asyncio.run(run_client(cfg, bridge, ack_queue, initial_enroll_code))
 
-async def run_client(cfg):
+async def run_client(cfg, bridge: CommandBridge, ack_queue: "queue.Queue[dict]", initial_enroll_code: str | None):
     delay = 2  # seconds
     max_delay = 30
 
-    pending_enroll_code: str | None = None
+    pending_enroll_code: str | None = initial_enroll_code
     
     while True:
         try:
@@ -212,6 +245,7 @@ async def run_client(cfg):
                 await ws.send(json.dumps(hello))
                 logging.info("Sent hello: %s", hello)
                 hb_task = asyncio.create_task(heartbeat_loop(ws, interval_s=25))
+                ack_task = asyncio.create_task(ack_sender_loop(ws, ack_queue))
 
                 # Receive loop (dispatch + ack)
                 try:
@@ -240,8 +274,8 @@ async def run_client(cfg):
                         logging.info("Received command type=%s id=%s", cmd_type, cmd_id)
 
                         try:
-                            parse_command(data)
-                            await send_ack(ws, cmd_id, status="ok")
+                            bridge.command_received.emit(data)
+                            await send_ack(ws, cmd_id, status="received")
                         except Exception as e:
                             logging.exception("Command failed for id=%s type=%s", cmd_id, cmd_type)
                             await send_ack(ws, cmd_id, status="failed", detail=str(e))
@@ -251,6 +285,12 @@ async def run_client(cfg):
                         await hb_task
                     except asyncio.CancelledError:
                         pass
+                    ack_task.cancel()
+                    try:
+                        await ack_task
+                    except asyncio.CancelledError:
+                        pass
+
 
         except KeyboardInterrupt:
             logging.info("KeyboardInterrupt")
@@ -267,6 +307,10 @@ async def run_client(cfg):
 
 def main() -> None:
     setup_logging()
+    
+    app = QApplication([])
+    app.setQuitOnLastWindowClosed(False)
+    
     cfg = load_config()
     if cfg is None:
         cfg = first_run_setup()
@@ -277,10 +321,9 @@ def main() -> None:
         if parsed.query:
             raise ValueError("--server must not include query parameters")
         cfg.server_base_url = args.server.strip()
-
-
+    
     device_name = socket.gethostname()
-
+    
     logging.info("Client identity loaded")
     logging.info("  username:   %s", cfg.username)
     logging.info("  device_id:  %s", cfg.device_id)
@@ -288,9 +331,24 @@ def main() -> None:
     logging.info("  server_base_url: %s", cfg.server_base_url)
     logging.info("  config:     %s", CONFIG_PATH)
     logging.info("  log:        %s", LOG_PATH)
-    
-    asyncio.run(run_client(cfg))
 
+
+    bridge = CommandBridge()
+    ack_queue: "queue.Queue[dict]" = queue.Queue()
+    dispatcher = CommandDispatcher(ack_queue)
+
+    session_runner = SessionRunner(dispatcher.handle_command)
+    set_session_runner(session_runner)
+    bridge.command_received.connect(dispatcher.handle_command)
+
+    initial_enroll_code: str | None = None
+    if cfg.device_token is None:
+        initial_enroll_code = get_enroll_code_or_exit()
+
+    t = threading.Thread(target=_network_thread_main, args=(cfg, bridge, ack_queue, initial_enroll_code), daemon=True)
+    t.start()
+
+    app.exec()
 
 if __name__ == "__main__":
     main()

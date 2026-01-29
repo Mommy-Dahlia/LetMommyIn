@@ -47,8 +47,63 @@
         </label>
       </p>
 
+      <p>
+        <label>Lifespan (seconds)<br />
+          <input
+            name="lifespan_s"
+            type="number"
+            min="0"
+            placeholder="(default: 10)"
+          />
+        </label>
+      </p>
+
       <button type="submit">Send</button>
     </form>
+
+    <form
+      hx-post="/device/{{ device.device_id }}/open_url"
+      hx-target="#send-result"
+      hx-swap="innerHTML"
+    >
+      <p>
+        <label>Open URL<br />
+          <input name="url" required placeholder="https://example.com" />
+        </label>
+      </p>
+
+      <button type="submit">Open</button>
+    </form>
+
+    <form
+      hx-post="/device/{{ device.device_id }}/image_popup"
+      hx-target="#send-result"
+      hx-swap="innerHTML"
+    >
+      <p>
+        <label>Image URL<br />
+          <input name="url" required placeholder="https://example.com/image.png" />
+        </label>
+      </p>
+
+      <button type="submit">Show Image</button>
+    </form>
+
+    <form
+      hx-post="/device/{{ device.device_id }}/session/start"
+      hx-target="#send-result"
+      hx-swap="innerHTML"
+      enctype="multipart/form-data"
+    >
+      <p>
+        <label>Session file (.json)<br />
+          <input name="session_file" type="file" accept=".json,application/json" required />
+        </label>
+      </p>
+
+      <button type="submit">Start Session</button>
+    </form>
+
 
     <div id="send-result" style="margin-top: 10px;"></div>
 
