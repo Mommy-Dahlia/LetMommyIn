@@ -19,6 +19,9 @@ from fastapi.responses import HTMLResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+PROTOCOL_VERSION = "v0.1"
+MAX_LOG_EVENTS = 1000
+
 def init_db() -> None:
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute("PRAGMA journal_mode=WAL;")
@@ -154,18 +157,25 @@ def create_device(device_id: str, device_token: str, username: str | None, devic
         conn.commit()
 
 
-def update_device_metadata(device_id: str, username: str | None, device_name: str | None) -> None:
+def update_device_metadata(device_id: str, username: str | None, device_name: str | None, *, allow_identity_change=False):
     now = int(time.time())
     with sqlite3.connect(DB_PATH) as conn:
-        conn.execute(
-            """
-            UPDATE devices
-            SET last_seen = ?, username = COALESCE(?, username), device_name = COALESCE(?, device_name)
-            WHERE device_id = ?
-            """,
-            (now, username, device_name, device_id),
-        )
+        if allow_identity_change:
+            conn.execute(
+                """
+                UPDATE devices
+                SET last_seen = ?, username = COALESCE(?, username), device_name = COALESCE(?, device_name)
+                WHERE device_id = ?
+                """,
+                (now, username, device_name, device_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE devices SET last_seen = ? WHERE device_id = ?",
+                (now, device_id),
+            )
         conn.commit()
+
 
 @app.get("/health")
 def health():
@@ -211,6 +221,8 @@ class Hub:
                 detail=f"{device.username} @ {device.device_name}"
             )
         )
+        if len(self.logs) > MAX_LOG_EVENTS:
+            self.logs.pop(0)
 
     def unregister(self, device_id: str):
         self.connections.pop(device_id, None)
@@ -225,6 +237,8 @@ class Hub:
                     detail=f"{dev.username} @ {dev.device_name}"
                 )
             )
+            if len(self.logs) > MAX_LOG_EVENTS:
+                self.logs.pop(0)
 
     def update_last_seen(self, device_id: str):
         dev = self.devices.get(device_id)
@@ -241,6 +255,8 @@ class Hub:
                 command_id=command_id,
             )
         )
+        if len(self.logs) > MAX_LOG_EVENTS:
+            self.logs.pop(0)
 
     def handle_ack(self, device_id: str, msg: dict):
         # Expect: {type:"ack", id:"cmd_x", status:"shown", detail:""}
@@ -453,6 +469,209 @@ async def session_start_htmx(
 
     return PlainTextResponse(f"Sent {cmd_id} session_id={session_id}")
 
+@app.post("/device/{device_id}/write_for_me")
+async def write_for_me_htmx(
+    device_id: str,
+    text: str = Form(...),
+    reps: str = Form("5"),
+):
+    if device_id not in hub.connections:
+        return PlainTextResponse("Device is offline (no active connection).", status_code=409)
+
+    text = (text or "").strip()
+    if not text:
+        return PlainTextResponse("Text is required.", status_code=400)
+
+    try:
+        reps_val = int(reps)
+    except Exception:
+        return PlainTextResponse("reps must be an integer.", status_code=400)
+
+    if reps_val < 1 or reps_val > 500:
+        return PlainTextResponse("reps out of range (1-500).", status_code=400)
+
+    cmd_id = f"cmd_{uuid.uuid4().hex[:10]}"
+    payload = {
+        "type": "write_for_me",
+        "id": cmd_id,
+        "text": text,
+        "reps": reps_val,
+    }
+
+    ws = hub.connections[device_id]
+    await ws.send_text(json.dumps(payload))
+
+    hub.log(device_id, "sent", detail=f"write_for_me reps={reps_val}", command_id=cmd_id)
+
+    return PlainTextResponse(f"Sent {cmd_id}")
+
+@app.post("/device/{device_id}/gif_overlay")
+async def gif_overlay_htmx(
+    device_id: str,
+    url: str = Form(...),
+    opacity: str = Form("1.0"),
+    screen: str = Form("-1"),   # -1 = all screens
+):
+    if device_id not in hub.connections:
+        return PlainTextResponse("Device is offline (no active connection).", status_code=409)
+
+    url = url.strip()
+    if not url:
+        return PlainTextResponse("URL is required.", status_code=400)
+
+    try:
+        opacity_val = float(opacity)
+        screen_val = int(screen)
+    except Exception:
+        return PlainTextResponse("Bad opacity/screen.", status_code=400)
+
+    # Clamp opacity to sane range
+    if opacity_val < 0.0:
+        opacity_val = 0.0
+    if opacity_val > 1.0:
+        opacity_val = 1.0
+
+    cmd_id = f"cmd_{uuid.uuid4().hex[:10]}"
+    payload = {
+        "type": "gif_overlay",
+        "id": cmd_id,
+        "url": url,
+        "opacity": opacity_val,
+        "screen": screen_val,
+    }
+
+    ws = hub.connections[device_id]
+    await ws.send_text(json.dumps(payload))
+
+    hub.log(device_id, "sent", detail="gif_overlay", command_id=cmd_id)
+    return PlainTextResponse(f"Sent {cmd_id}")
+
+@app.post("/device/{device_id}/gif_overlay/stop")
+async def gif_overlay_stop_htmx(device_id: str):
+    if device_id not in hub.connections:
+        return PlainTextResponse("Device is offline (no active connection).", status_code=409)
+
+    cmd_id = f"cmd_{uuid.uuid4().hex[:10]}"
+    payload = {"type": "gif_overlay_stop", "id": cmd_id}
+
+    ws = hub.connections[device_id]
+    await ws.send_text(json.dumps(payload))
+
+    hub.log(device_id, "sent", detail="gif_overlay_stop", command_id=cmd_id)
+    return PlainTextResponse(f"Sent {cmd_id}")
+
+@app.post("/device/{device_id}/audio_play")
+async def audio_play_htmx(
+    device_id: str,
+    url: str = Form(...),
+    volume: str = Form("0.8"),
+    loop: str = Form("true"),
+    duration_s: str = Form(""),   # blank = no auto-stop
+):
+    if device_id not in hub.connections:
+        return PlainTextResponse("Device is offline (no active connection).", status_code=409)
+
+    url = url.strip()
+    if not url:
+        return PlainTextResponse("URL is required.", status_code=400)
+
+    try:
+        volume_val = float(volume)
+    except Exception:
+        return PlainTextResponse("volume must be a number (0.0 - 1.0).", status_code=400)
+
+    loop_val = (loop.strip().lower() in ("1", "true", "yes", "on"))
+
+    duration_val = None
+    duration_s = duration_s.strip()
+    if duration_s != "":
+        try:
+            duration_val = float(duration_s)
+        except Exception:
+            return PlainTextResponse("duration_s must be a number (seconds).", status_code=400)
+
+    cmd_id = f"cmd_{uuid.uuid4().hex[:10]}"
+    payload = {
+        "type": "audio_play",
+        "id": cmd_id,
+        "url": url,
+        "volume": volume_val,
+        "loop": loop_val,
+        "duration_s": duration_val,
+    }
+
+    ws = hub.connections[device_id]
+    await ws.send_text(json.dumps(payload))
+    hub.log(device_id, "sent", detail="audio_play", command_id=cmd_id)
+    return PlainTextResponse(f"Sent {cmd_id}")
+
+@app.post("/device/{device_id}/audio_stop")
+async def audio_stop_htmx(device_id: str):
+    if device_id not in hub.connections:
+        return PlainTextResponse("Device is offline (no active connection).", status_code=409)
+
+    cmd_id = f"cmd_{uuid.uuid4().hex[:10]}"
+    payload = {"type": "audio_stop", "id": cmd_id}
+
+    ws = hub.connections[device_id]
+    await ws.send_text(json.dumps(payload))
+    hub.log(device_id, "sent", detail="audio_stop", command_id=cmd_id)
+    return PlainTextResponse(f"Sent {cmd_id}")
+
+@app.post("/device/{device_id}/subliminal_start")
+async def subliminal_start_htmx(
+    device_id: str,
+    messages: str = Form(...),      # multiline textarea; one message per line
+    duration_s: str = Form("10"),
+    interval_ms: str = Form("50"),
+    flash_ms: str = Form("16"),
+    font_pt: str = Form("18"),
+):
+    if device_id not in hub.connections:
+        return PlainTextResponse("Device is offline (no active connection).", status_code=409)
+
+    # Parse messages (one per line)
+    msgs = [m.strip() for m in (messages or "").splitlines() if m.strip()]
+    if not msgs:
+        return PlainTextResponse("messages is required (one per line).", status_code=400)
+
+    try:
+        duration_val = float(duration_s)
+        interval_val = int(interval_ms)
+        flash_val = int(flash_ms)
+        font_val = int(font_pt)
+    except Exception:
+        return PlainTextResponse("Bad numeric field(s).", status_code=400)
+
+    cmd_id = f"cmd_{uuid.uuid4().hex[:10]}"
+    payload = {
+        "type": "subliminal_start",
+        "id": cmd_id,
+        "messages": msgs,
+        "duration_s": duration_val,
+        "interval_ms": interval_val,
+        "flash_ms": flash_val,
+        "font_pt": font_val,
+    }
+
+    ws = hub.connections[device_id]
+    await ws.send_text(json.dumps(payload))
+    hub.log(device_id, "sent", detail="subliminal_start", command_id=cmd_id)
+    return PlainTextResponse(f"Sent {cmd_id}")
+
+@app.post("/device/{device_id}/subliminal_stop")
+async def subliminal_stop_htmx(device_id: str):
+    if device_id not in hub.connections:
+        return PlainTextResponse("Device is offline (no active connection).", status_code=409)
+
+    cmd_id = f"cmd_{uuid.uuid4().hex[:10]}"
+    payload = {"type": "subliminal_stop", "id": cmd_id}
+
+    ws = hub.connections[device_id]
+    await ws.send_text(json.dumps(payload))
+    hub.log(device_id, "sent", detail="subliminal_stop", command_id=cmd_id)
+    return PlainTextResponse(f"Sent {cmd_id}")
+
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket):
     await ws.accept()
@@ -494,7 +713,13 @@ async def ws_endpoint(ws: WebSocket):
         device_id = str(msg.get("device_id", "")).strip()
         username = str(msg.get("username", "")).strip()
         device_name = str(msg.get("device_name", "")).strip()
-        version = str(msg.get("version", "0.0")).strip()
+        version = str(msg.get("version", "v0.0")).strip()
+        protocol = str(msg.get("protocol","v0.0")).strip()
+        
+        if protocol != PROTOCOL_VERSION:
+            await ws.close(code=1008)
+            return
+
 
         if not device_id or not username:
             await ws.close(code=1008)
@@ -525,13 +750,12 @@ async def ws_endpoint(ws: WebSocket):
                 "type": "enroll_ok",
                 "device_token": new_token,
             }))
+            update_device_metadata(device_id, username=username, device_name=device_name,allow_identity_change=True)
         else:
-            # Existing device path: we already validated device_token earlier
-            # Optionally you can send an info message, but do NOT send enroll_ok
-            pass
+            update_device_metadata(device_id, username=username, device_name=device_name)
 
         
-        update_device_metadata(device_id, username=username, device_name=device_name)
+        
 
         # 3) Register device in the hub
         dev = DeviceInfo(
@@ -560,6 +784,8 @@ async def ws_endpoint(ws: WebSocket):
                 hub.handle_ack(device_id, msg)
             else:
                 hub.log(device_id, "client_message", detail=f"unknown type: {mtype}")
+                await ws.close(code=1003)
+                return
 
     except WebSocketDisconnect:
         # Client disconnected normally

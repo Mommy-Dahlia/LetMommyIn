@@ -19,17 +19,30 @@ class SessionRunner(QObject):
         self._session_id: str | None = None
         self._steps: list[dict] = []
         self._i = 0
-        self._timer: QTimer | None = None
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.timeout.connect(self._run_next_step)
+        self._paused = False
+
+    def pause(self) -> None:
+        self._paused = True
+        self._timer.stop()
+
+    def resume(self) -> None:
+        print("SessionRunner.resume called", "active=", self._active, "paused=", self._paused, "i=", self._i, "n=", len(self._steps))
+        if not self._active:
+            return
+        self._paused = False
+        # continue immediately
+        self._timer.start(0)
 
     def is_active(self) -> bool:
         return self._active
 
     def cancel(self) -> None:
-        if self._timer is not None:
-            self._timer.stop()
-            self._timer.deleteLater()
-            self._timer = None
+        self._timer.stop()
         self._active = False
+        self._paused = False
         self._session_id = None
         self._steps = []
         self._i = 0
@@ -46,6 +59,9 @@ class SessionRunner(QObject):
         self._run_next_step()
 
     def _run_next_step(self) -> None:
+        if self._paused:
+            return
+
         if not self._active:
             return
 
@@ -56,19 +72,16 @@ class SessionRunner(QObject):
 
         step = dict(self._steps[self._i])  # shallow copy
         self._i += 1
-
-        # Dispatch the step immediately
-        self._dispatch(step)
-
         # Timer is session pacing only (Option A)
         timer_s = step.get("timer_s")
         if timer_s is None:
             # Apply session default pacing
             # Inject effective timer into the step so message lifespan derivation can use it.
-            step["timer_s"] = DEFAULT_SESSION_TIMER_MS / 1000.0
-            QTimer.singleShot(DEFAULT_SESSION_TIMER_MS, self._run_next_step)
-            return
+            timer_s = DEFAULT_SESSION_TIMER_MS / 1000.0
+            step["timer_s"] = timer_s
 
+        # Dispatch the step immediately
+        self._dispatch(step)
 
         try:
             delay_ms = int(float(timer_s) * 1000)
@@ -78,4 +91,4 @@ class SessionRunner(QObject):
         if delay_ms < 0:
             delay_ms = 0
 
-        QTimer.singleShot(delay_ms, self._run_next_step)
+        self._timer.start(delay_ms)

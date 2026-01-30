@@ -84,7 +84,10 @@ class ImagePopup(QDialog):
         self.move(frmX, frmY)
 
     def getAndSetImageFromURL(self, imageURL):
-        self.imdata = requests.get(imageURL)  # get the image from the web
+        try:
+            self.imdata = requests.get(imageURL, timeout=5)
+        except requests.RequestException:
+            return
         self.max = 800  # max image size
         if self.imdata.status_code == 200:  # if the image was got successfully
             self.imaged = Image.open(BytesIO(self.imdata.content))

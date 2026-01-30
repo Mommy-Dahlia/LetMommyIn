@@ -89,6 +89,91 @@
       <button type="submit">Show Image</button>
     </form>
 
+    <form hx-post="/device/{{ device.device_id }}/audio_play" hx-target="#send-result" hx-swap="innerHTML">
+      <div>
+        <label>Audio URL</label><br/>
+        <input type="text" name="url" style="width: 100%;" placeholder="https://.../loop.mp3" />
+      </div>
+
+      <div style="display:flex; gap: 1rem; margin-top: .5rem;">
+        <div>
+          <label>Volume (0-1)</label><br/>
+          <input type="text" name="volume" value="0.8" />
+        </div>
+
+        <div>
+          <label>Loop</label><br/>
+          <select name="loop">
+            <option value="true" selected>true</option>
+            <option value="false">false</option>
+          </select>
+        </div>
+
+        <div>
+          <label>Duration (s)</label><br/>
+          <input type="text" name="duration_s" placeholder="blank = infinite" />
+        </div>
+      </div>
+
+      <button type="submit" style="margin-top: .5rem;">Play</button>
+    </form>
+
+    <form hx-post="/device/{{ device.device_id }}/audio_stop" hx-target="#send-result" hx-swap="innerHTML" style="margin-top:.5rem;">
+      <button type="submit">Stop</button>
+    </form>
+
+    <form hx-post="/device/{{ device.device_id }}/subliminal_start" hx-target="#send-result" hx-swap="innerHTML">
+      <div>
+        <label>Messages (one per line)</label><br/>
+        <textarea name="messages" rows="6" style="width: 100%;"></textarea>
+      </div>
+
+      <div style="display:flex; gap: 1rem; margin-top: .5rem;">
+        <div>
+          <label>Duration (s)</label><br/>
+          <input type="text" name="duration_s" value="10" />
+        </div>
+        <div>
+          <label>Interval (ms)</label><br/>
+          <input type="text" name="interval_ms" value="50" />
+        </div>
+        <div>
+          <label>Flash (ms)</label><br/>
+          <input type="text" name="flash_ms" value="16" />
+        </div>
+        <div>
+          <label>Font (pt)</label><br/>
+          <input type="text" name="font_pt" value="18" />
+        </div>
+      </div>
+
+      <button type="submit" style="margin-top: .5rem;">Start</button>
+    </form>
+
+    <form hx-post="/device/{{ device.device_id }}/subliminal_stop" hx-target="#send-result" hx-swap="innerHTML" style="margin-top:.5rem;">
+      <button type="submit">Stop</button>
+    </form>
+
+    <form
+      hx-post="/device/{{ device.device_id }}/write_for_me"
+      hx-target="#send-result"
+      hx-swap="innerHTML"
+    >
+      <div>
+        <label>Write text</label><br/>
+        <input type="text" name="text" style="width: 100%;" />
+      </div>
+
+      <div style="margin-top: .5rem;">
+        <label>Repetitions</label><br/>
+        <input type="text" name="reps" value="5" />
+      </div>
+
+      <button type="submit" style="margin-top: .5rem;">
+        Send Write-For-Me
+      </button>
+    </form>
+
     <form
       hx-post="/device/{{ device.device_id }}/session/start"
       hx-target="#send-result"
@@ -104,6 +189,38 @@
       <button type="submit">Start Session</button>
     </form>
 
+    <form
+      hx-post="/device/{{ device.device_id }}/gif_overlay"
+      hx-target="#send-result"
+      hx-swap="innerHTML"
+    >
+      <div>
+        <label>GIF Overlay URL</label><br/>
+        <input type="text" name="url" style="width: 100%;" placeholder="https://.../overlay.gif" />
+      </div>
+
+      <div style="display:flex; gap: 1rem; margin-top: .5rem;">
+        <div>
+          <label>Opacity (0-1)</label><br/>
+          <input type="text" name="opacity" value="0.4" />
+        </div>
+        <div>
+          <label>Screen (-1 = all)</label><br/>
+          <input type="text" name="screen" value="-1" />
+        </div>
+      </div>
+
+      <button type="submit" style="margin-top: .5rem;">Start Overlay</button>
+    </form>
+
+    <form
+      hx-post="/device/{{ device.device_id }}/gif_overlay/stop"
+      hx-target="#send-result"
+      hx-swap="innerHTML"
+      style="margin-top: .5rem;"
+    >
+      <button type="submit">Stop Overlay</button>
+    </form>
 
     <div id="send-result" style="margin-top: 10px;"></div>
 

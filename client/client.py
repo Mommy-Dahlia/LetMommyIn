@@ -17,14 +17,22 @@ import threading
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtWidgets import QApplication, QInputDialog, QMessageBox
 
+from parser import parse_command, set_session_runner, set_audio_manager, set_subliminal_manager, set_wfm_manager, set_ack_queue
 from session_runner import SessionRunner
-from parser import parse_command, set_session_runner
+from audio_manager import AudioManager
+from subliminal_manager import SubliminalManager
+from wfm_manager import WfmManager
+
 
 CONFIG_DIR = Path(os.getenv("APPDATA", ".")) / "LMI"
 CONFIG_PATH = CONFIG_DIR / "config.json"
 
 LOG_DIR = CONFIG_DIR / "logs"
 LOG_PATH = LOG_DIR / "client.log"
+
+ACK_RECEIVED = "received"
+ACK_COMPLETED = "completed"
+ACK_FAILED = "failed"
 
 @dataclass
 class ClientConfig:
@@ -65,12 +73,14 @@ class CommandDispatcher(QObject):
                 cmd_id,
                 data.get("type"),
             )
-            self.ack_queue.put({
-                "id": cmd_id,
-                "status": "failed",
-                "detail": str(e),
-            })
-
+            try:
+                self.ack_queue.put_nowait({
+                    "id": cmd_id,
+                    "status": "failed",
+                    "detail": str(e),
+                })
+            except queue.Full:
+                logging.warning("Ack queue full; dropping ack for id=%s", cmd_id)
 
 def save_config(cfg: ClientConfig) -> None:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
@@ -84,7 +94,8 @@ def build_hello(cfg) -> dict:
         "device_id": cfg.device_id,
         "username": cfg.username,
         "device_name": socket.gethostname(),
-        "version": "0.1-prototype",
+        "version": "v0.1",
+        "protocol": "v0.1"
     }
 
 def parse_args():
@@ -275,10 +286,10 @@ async def run_client(cfg, bridge: CommandBridge, ack_queue: "queue.Queue[dict]",
 
                         try:
                             bridge.command_received.emit(data)
-                            await send_ack(ws, cmd_id, status="received")
+                            await send_ack(ws, cmd_id, status=ACK_RECEIVED)
                         except Exception as e:
                             logging.exception("Command failed for id=%s type=%s", cmd_id, cmd_type)
-                            await send_ack(ws, cmd_id, status="failed", detail=str(e))
+                            await send_ack(ws, cmd_id, status=ACK_FAILED, detail=str(e))
                 finally:
                     hb_task.cancel()
                     try:
@@ -334,11 +345,19 @@ def main() -> None:
 
 
     bridge = CommandBridge()
-    ack_queue: "queue.Queue[dict]" = queue.Queue()
+    ack_queue = queue.Queue(maxsize=1000)
+    set_ack_queue(ack_queue)
     dispatcher = CommandDispatcher(ack_queue)
 
     session_runner = SessionRunner(dispatcher.handle_command)
     set_session_runner(session_runner)
+    audio_manager = AudioManager()
+    set_audio_manager(audio_manager)
+    subliminal_manager = SubliminalManager()
+    set_subliminal_manager(subliminal_manager)
+    wfm_manager = WfmManager()
+    set_wfm_manager(wfm_manager)
+
     bridge.command_received.connect(dispatcher.handle_command)
 
     initial_enroll_code: str | None = None

@@ -18,28 +18,42 @@ _ACTIVE_DIALOGS: list[QDialog] = []
 
 class MessagePopup(QDialog):
     
-    def show_with_attention_lock(self, lock_ms: int = 250) -> None:
-        # 1) Start topmost
+    def show_on_top(self):
         self.setWindowFlag(Qt.WindowStaysOnTopHint, True)
         self.show()
-        
-        # 2) Ask the window manager to bring it forward
         self.raise_()
         self.activateWindow()
-        
-        # 3) Release topmost after a brief period (like your Tkinter version)
-        def _release_topmost():
-            self.setWindowFlag(Qt.WindowStaysOnTopHint, False)
-            self.show()           # re-apply window flags
-            self.raise_()         # keep it visible, but not permanently topmost
-        
-        QTimer.singleShot(lock_ms, _release_topmost)
-
 
     def __init__(self, title: str | None, body: str, lifespan_s: int | None = None, parent=None):
         super().__init__(parent)
+        self.setWindowFlags(
+            self.windowFlags()
+            | Qt.WindowStaysOnTopHint
+            | Qt.Window
+        )
+        self.setWindowFlag(Qt.WindowCloseButtonHint, False)
+        self.setWindowFlag(Qt.WindowSystemMenuHint, False)
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #e8d9f1;
+            }
+            QLabel {
+                color: #4b006e;
+            }
+            QPushButton {
+                background-color: #dcc6ea;
+                color: #4b006e;
+                border: 1px solid #4b006e;
+                padding: 6px 10px;
+                border-radius: 8px;
+            }
+            QPushButton:hover {
+                background-color: #e8d9f1;
+            }
+        """)
+
         font1 = QFont()
-        font1.setPointSize(10)
+        font1.setPointSize(12)
         icon_path = resource_path("MommyIcon.ico")
         if os.path.exists(icon_path):
             self.setWindowIcon(QIcon(icon_path))
@@ -70,5 +84,5 @@ def show_message(title: str | None, body: str, lifespan_s: int | None = None) ->
             _ACTIVE_DIALOGS.remove(dlg)
     dlg.destroyed.connect(_forget)
     
-    dlg.show_with_attention_lock(lock_ms=250)
+    dlg.show_on_top()
 
