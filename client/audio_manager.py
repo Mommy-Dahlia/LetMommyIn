@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from PySide6.QtCore import QObject, QUrl, QTimer
-from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
+from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput, QMediaDevices, QAudioDevice
 
 
 @dataclass
@@ -62,3 +62,26 @@ class AudioManager(QObject):
 
         self._player.stop()
         self.state = AudioState()
+        
+    def get_audio_device_choices(self) -> list[tuple[str, str | None]]:
+        """
+        Returns [(label, device_id_or_none)].
+        device_id is a stable-ish identifier we store in config.
+        """
+        out = [("Default", None)]
+        for dev in QMediaDevices.audioOutputs():
+            # id() is QByteArray; convert to hex string
+            dev_id = bytes(dev.id()).hex()
+            out.append((dev.description(), dev_id))
+        return out
+
+    def set_output_device_by_id(self, dev_id_hex: str | None) -> None:
+        if not dev_id_hex:
+            return  # default device
+        target = None
+        for dev in QMediaDevices.audioOutputs():
+            if bytes(dev.id()).hex() == dev_id_hex:
+                target = dev
+                break
+        if target is not None:
+            self._audio.setDevice(target)

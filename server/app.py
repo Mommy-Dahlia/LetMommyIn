@@ -208,6 +208,8 @@ class Hub:
 
         # simple event log (in memory for PoC)
         self.logs: list[LogEvent] = []
+        
+        self.last_command_ts: float | None = None
 
     def register(self, device: DeviceInfo, ws: WebSocket):
         self.connections[device.device_id] = ws
@@ -246,6 +248,8 @@ class Hub:
             dev.last_seen = time.time()
     
     def log(self, device_id: str, event: str, detail: str = "", command_id: str = "-"):
+        if event == "sent":
+            self.last_command_ts = time.time()
         self.logs.append(
             LogEvent(
                 ts=time.time(),
@@ -778,6 +782,10 @@ async def ws_endpoint(ws: WebSocket):
             mtype = msg.get("type")
 
             if mtype == "heartbeat":
+                await ws.send_text(json.dumps({
+                    "type": "server_status",
+                    "last_command_ts": hub.last_command_ts,
+                }))
                 hub.update_last_seen(device_id)
                 update_device_metadata(device_id, None, None)
             elif mtype == "ack":

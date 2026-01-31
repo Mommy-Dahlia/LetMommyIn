@@ -1,5 +1,6 @@
 import json
 import os
+import sys
 import socket
 import uuid
 from dataclasses import dataclass, asdict
@@ -14,15 +15,31 @@ import queue
 
 import websockets
 import threading
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, Signal, QTimer
 from PySide6.QtWidgets import QApplication, QInputDialog, QMessageBox
+from PySide6.QtGui import QIcon
 
 from parser import parse_command, set_session_runner, set_audio_manager, set_subliminal_manager, set_wfm_manager, set_ack_queue
+from pyside_show_message import close_all_messages
+from pyside_show_image import close_all_images
+from pyside_show_writeforme import close_all_wfm
+from pyside_overlay import stop_gif_overlays
 from session_runner import SessionRunner
 from audio_manager import AudioManager
 from subliminal_manager import SubliminalManager
 from wfm_manager import WfmManager
+from tray_manager import TrayManager
+from ui_settings import set_popup_screens
 
+_NET_LOOP: asyncio.AbstractEventLoop | None = None
+_NET_WS = None  # websockets client protocol
+_NET_STOP = threading.Event()
+
+def resource_path(relative: str) -> str:
+    # same convention you used in other modules
+    if hasattr(sys, "_MEIPASS"):
+        return str(Path(sys._MEIPASS) / relative)
+    return str(Path(__file__).parent / relative)
 
 CONFIG_DIR = Path(os.getenv("APPDATA", ".")) / "LMI"
 CONFIG_PATH = CONFIG_DIR / "config.json"
@@ -40,6 +57,8 @@ class ClientConfig:
     username: str
     server_base_url: str          # e.g. "wss://lmi.<DOMAIN>.com/ws"
     device_token: str | None = None
+    popup_screens: list[int] | None = None   # None = all screens
+    audio_device_id: str | None = None       # None = default output
 
 def load_config() -> ClientConfig | None:
     if not CONFIG_PATH.exists():
@@ -64,6 +83,17 @@ class CommandDispatcher(QObject):
         self.ack_queue = ack_queue
 
     def handle_command(self, data: dict) -> None:
+        t = data.get("type")
+        if t == "__tray_status__":
+            if hasattr(self, "tray") and self.tray is not None:
+                self.tray.set_last_server_cmd_ts(data.get("last_command_ts"))
+            return
+
+        if t == "__tray_connected__":
+            if hasattr(self, "tray") and self.tray is not None:
+                self.tray.set_connected(bool(data.get("connected")))
+            return
+
         cmd_id = data.get("id", "-")
         try:
             parse_command(data)
@@ -217,6 +247,7 @@ def setup_logging() -> None:
         return
 
     fmt = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
+    fmt.converter = time.gmtime
 
     # File handler (rotating so it doesn't grow forever)
     file_handler = RotatingFileHandler(LOG_PATH, maxBytes=1_000_000, backupCount=3, encoding="utf-8")
@@ -235,12 +266,17 @@ def _network_thread_main(cfg: ClientConfig, bridge: CommandBridge, ack_queue: "q
     asyncio.run(run_client(cfg, bridge, ack_queue, initial_enroll_code))
 
 async def run_client(cfg, bridge: CommandBridge, ack_queue: "queue.Queue[dict]", initial_enroll_code: str | None):
+    global _NET_LOOP
+    _NET_LOOP = asyncio.get_running_loop()
+    
     delay = 2  # seconds
     max_delay = 30
 
     pending_enroll_code: str | None = initial_enroll_code
     
     while True:
+        if _NET_STOP.is_set():
+            return
         try:
             if not cfg.device_token and pending_enroll_code is None:
                 pending_enroll_code = get_enroll_code_or_exit()
@@ -248,6 +284,10 @@ async def run_client(cfg, bridge: CommandBridge, ack_queue: "queue.Queue[dict]",
             ws_url = build_ws_url(cfg, enroll_code=pending_enroll_code)
             logging.info("Connecting to %s ...", ws_url)
             async with websockets.connect(ws_url) as ws:
+                global _NET_WS
+                _NET_WS = ws
+
+                bridge.command_received.emit({"type": "__tray_connected__", "connected": True})
 
                 # Reset backoff on successful connect
                 delay = 2
@@ -265,6 +305,18 @@ async def run_client(cfg, bridge: CommandBridge, ack_queue: "queue.Queue[dict]",
                         data = json.loads(raw)
                         
                         cmd_type = data.get("type")
+                        
+                        if cmd_type == "server_status":
+                            # send to tray via Qt signal-safe path:
+                            ts = data.get("last_command_ts")
+                            try:
+                                ts_val = float(ts) if ts is not None else None
+                            except Exception:
+                                ts_val = None
+                            # we need a Qt-thread call; simplest: emit via existing bridge
+                            bridge.command_received.emit({"type": "__tray_status__", "last_command_ts": ts_val})
+                            continue
+
                         if cmd_type == "enroll_ok":
                             token = data.get("device_token")
                             if not token:
@@ -291,6 +343,7 @@ async def run_client(cfg, bridge: CommandBridge, ack_queue: "queue.Queue[dict]",
                             logging.exception("Command failed for id=%s type=%s", cmd_id, cmd_type)
                             await send_ack(ws, cmd_id, status=ACK_FAILED, detail=str(e))
                 finally:
+                    _NET_WS = None
                     hb_task.cancel()
                     try:
                         await hb_task
@@ -305,16 +358,45 @@ async def run_client(cfg, bridge: CommandBridge, ack_queue: "queue.Queue[dict]",
 
         except KeyboardInterrupt:
             logging.info("KeyboardInterrupt")
+            bridge.command_received.emit({"type": "__tray_connected__", "connected": False})
             return
         except Exception as e:
             # If we're trying to enroll and the connection failed, ask for a new code next time
             if cfg.device_token is None:
                 pending_enroll_code = None
+                
+            if _NET_STOP.is_set():
+                return
+
+            # tell Qt thread we are disconnected (tray icon)
+            try:
+                bridge.command_received.emit({"type": "__tray_connected__", "connected": False})
+            except Exception:
+                pass
 
             logging.warning("Connection error: %r", e)
             logging.info("Reconnecting in %s seconds...", delay)
             await asyncio.sleep(delay)
             delay = min(max_delay, delay * 2)
+            
+def request_network_close() -> None:
+    """
+    Called from the Qt thread. Asks the asyncio loop to close the websocket.
+    """
+    global _NET_LOOP, _NET_WS
+
+    loop = _NET_LOOP
+    ws = _NET_WS
+    if loop is None or ws is None:
+        return
+
+    try:
+        fut = asyncio.run_coroutine_threadsafe(ws.close(code=1000, reason="client exit"), loop)
+        # don't block forever; just give it a moment
+        fut.result(timeout=1.0)
+    except Exception:
+        # ignore; we're exiting anyway
+        pass
 
 def main() -> None:
     setup_logging()
@@ -325,6 +407,8 @@ def main() -> None:
     cfg = load_config()
     if cfg is None:
         cfg = first_run_setup()
+        
+    set_popup_screens(cfg.popup_screens)
         
     args = parse_args()
     if args.server:
@@ -353,10 +437,92 @@ def main() -> None:
     set_session_runner(session_runner)
     audio_manager = AudioManager()
     set_audio_manager(audio_manager)
+    audio_manager.set_output_device_by_id(cfg.audio_device_id)
     subliminal_manager = SubliminalManager()
     set_subliminal_manager(subliminal_manager)
     wfm_manager = WfmManager()
     set_wfm_manager(wfm_manager)
+    def shutdown_now() -> None:
+        try:
+            _NET_STOP.set()
+            request_network_close()
+
+            # stop timers/managers
+            session_runner.cancel()
+            wfm_manager.cancel()
+            subliminal_manager.stop()
+            audio_manager.stop()
+            stop_gif_overlays()
+
+            # close dialogs
+            close_all_messages()
+            close_all_images()
+            close_all_wfm()
+
+            # hide tray + quit Qt
+            try:
+                tray.tray.hide()
+            except Exception:
+                pass
+            app.quit()
+
+        finally:
+            # guarantee process death even if something above fails
+            threading.Timer(0.2, lambda: os._exit(0)).start()
+
+    # --- Tray icon setup (Qt thread) ---
+    def get_selected_screens():
+        return cfg.popup_screens
+
+    def set_selected_screens(v):
+        set_popup_screens(v)
+        cfg.popup_screens = v
+        save_config(cfg)
+
+    def get_selected_audio():
+        return cfg.audio_device_id
+
+    def set_selected_audio(v):
+        cfg.audio_device_id = v
+        save_config(cfg)
+
+    def get_screen_choices():
+        # None means "all screens"
+        screens = QApplication.screens()
+        choices = [("All screens", None)]
+        for i, s in enumerate(screens):
+            # include geometry to help the user
+            g = s.geometry()
+            choices.append((f"Screen {i} ({g.width()}x{g.height()})", [i]))
+        return choices
+
+    def get_audio_choices():
+        # implemented in section 4 (AudioManager helper)
+        return audio_manager.get_audio_device_choices()
+    
+    # For now you can point all states at the same icon;
+    # later you can swap in MommyIcon_fresh.ico etc.
+    icon_fresh = QIcon(resource_path("MommyIcon.ico"))  # reuse your existing resource_path (see below)
+    icon_stale = QIcon(resource_path("MommyStale.ico"))
+    icon_offline = QIcon(resource_path("MommyOff.ico"))
+
+    tray = TrayManager(
+        icon_fresh=icon_fresh,
+        icon_stale=icon_stale,
+        icon_offline=icon_offline,
+        get_screen_choices=get_screen_choices,
+        get_audio_choices=get_audio_choices,
+        get_selected_screens=get_selected_screens,
+        set_selected_screens=set_selected_screens,
+        get_selected_audio=get_selected_audio,
+        set_selected_audio=set_selected_audio,
+    )
+    
+    dispatcher.tray = tray
+
+    tray.audio_device_changed.connect(lambda dev_id: audio_manager.set_output_device_by_id(dev_id))
+
+    tray.request_exit.connect(shutdown_now)
 
     bridge.command_received.connect(dispatcher.handle_command)
 

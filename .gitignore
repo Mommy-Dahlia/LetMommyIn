@@ -1,7 +1,7 @@
 # Python
 __pycache__/
-client/__pycache__/
-server/__pycache__/
+client/__pycache__/parser.cpython-313.pyc
+server/__pycache__/app.cpython-313.pyc
 *.pyc
 .venv/
 venv/

@@ -4,6 +4,7 @@ from pyside_overlay import show_gif_overlay, stop_gif_overlays
 from audio_manager import AudioManager
 from subliminal_manager import SubliminalManager
 from wfm_manager import WfmManager
+from ui_settings import get_popup_screens
 from PySide6.QtCore import QUrl
 from PySide6.QtGui import QDesktopServices
 
@@ -142,7 +143,18 @@ def parse_command(data):
         case "gif_overlay":
             url= data.get("body") or data.get("url") or ""
             opacity = data.get("opacity", 0.4)
-            screen = data.get("screen", -1)  # -1 = all
+            screen = data.get("screen", None)  # -1 = all
+            if screen is None:
+                sel = get_popup_screens()
+                if sel is None:
+                    screen = -1
+                elif len(sel) == 1:
+                    screen = sel[0]
+                else:
+                    # overlay on all selected screens: loop and call show_gif_overlay per screen index
+                    for idx in sel:
+                        show_gif_overlay(url, screen=int(idx), opacity=float(opacity))
+                    return
             show_gif_overlay(url, screen=int(screen), opacity=float(opacity))
         case "gif_overlay_stop":
             stop_gif_overlays()

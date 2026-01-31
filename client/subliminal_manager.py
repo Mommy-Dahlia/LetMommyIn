@@ -8,7 +8,7 @@ from typing import Sequence, Optional
 from PySide6.QtCore import QObject, Qt, QTimer
 from PySide6.QtWidgets import QApplication, QLabel, QDialog
 from PySide6.QtGui import QFont, QScreen
-
+from ui_settings import get_popup_screens
 
 @dataclass
 class SubliminalState:
@@ -84,7 +84,10 @@ class SubliminalManager(QObject):
             self._label.adjustSize()
 
             screens = QApplication.screens()
-            scr: QScreen = random.choice(screens)
+            allowed = get_popup_screens()
+            if allowed:
+                screens = [screens[i] for i in allowed if 0 <= i < len(screens)] or screens
+            scr = random.choice(screens)
             geom = scr.availableGeometry()
 
             w = max(200, min(self._label.width() + 40, 700))

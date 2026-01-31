@@ -1,9 +1,10 @@
 import sys
 import os
-from PySide6.QtWidgets import QPushButton, QLabel, QDialog, QVBoxLayout
+from PySide6.QtWidgets import QPushButton, QLabel, QDialog, QVBoxLayout, QApplication
 from PySide6.QtGui import QFont, QIcon
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, QPoint
 from pathlib import Path
+from ui_settings import get_popup_screens
 
 def resource_path(relative: str) -> str:
     """
@@ -58,6 +59,15 @@ class MessagePopup(QDialog):
         if os.path.exists(icon_path):
             self.setWindowIcon(QIcon(icon_path))
         self.resize(450, 100)
+        screens = QApplication.screens()
+        allowed = get_popup_screens()
+        if allowed:
+            screens = [screens[i] for i in allowed if 0 <= i < len(screens)] or screens
+        scr = screens[0]
+        geom = scr.availableGeometry()
+        x = geom.x() + (geom.width() - self.width()) // 2
+        y = geom.y() + (geom.height() - self.height()) // 2
+        self.move(QPoint(x, y))
         self.setWindowTitle(title or "")
         self.label = QLabel(body or "")
         self.label.setFont(font1)
@@ -86,3 +96,9 @@ def show_message(title: str | None, body: str, lifespan_s: int | None = None) ->
     
     dlg.show_on_top()
 
+def close_all_messages() -> None:
+    for dlg in list(_ACTIVE_DIALOGS):
+        try:
+            dlg.close()
+        except Exception:
+            pass

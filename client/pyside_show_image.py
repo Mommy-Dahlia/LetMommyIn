@@ -1,6 +1,7 @@
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import QApplication, QDialog, QLabel
 from PySide6.QtGui import QPixmap, QScreen, QIcon
+from ui_settings import get_popup_screens
 import sys
 import os
 from PIL import Image
@@ -63,7 +64,13 @@ class ImagePopup(QDialog):
         self.scaled = QPixmap()
         self.getAndSetImageFromURL(url)
         screens = QApplication.screens()
-        screm = random.choice(screens)
+        allowed = get_popup_screens()
+        if allowed is None or not allowed:
+            screm = random.choice(screens)
+        else:
+            idx = random.choice([i for i in allowed if 0 <= i < len(screens)]) if any(0 <= i < len(screens) for i in allowed) else 0
+            screm = screens[idx]
+
         geom = QScreen.availableGeometry(screm)  
         max_w = int(geom.width() * 0.6)
         max_h = int(geom.height() * 0.6)
@@ -120,4 +127,9 @@ def show_image(url: str) -> None:
 
     dlg.show_on_top()
 
-
+def close_all_images() -> None:
+    for dlg in list(_ACTIVE_DIALOGS):
+        try:
+            dlg.close()
+        except Exception:
+            pass

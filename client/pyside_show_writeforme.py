@@ -3,6 +3,7 @@ from PySide6.QtWidgets import QApplication, QDialog, QLabel, QVBoxLayout, QLineE
 from PySide6.QtGui import QPixmap, QScreen, QImage, QIcon
 import sys
 import os
+from ui_settings import get_popup_screens
 
 
 _ACTIVE_DIALOGS: list[QDialog] = []
@@ -103,6 +104,13 @@ class WriteForMommy(QDialog):
         self.guidetext.setLayoutDirection(Qt.LayoutDirection.LeftToRight)
         self.guidetext.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.resize(450, 100)
+        screens = QApplication.screens()
+        allowed = get_popup_screens()
+        if allowed:
+            screens = [screens[i] for i in allowed if 0 <= i < len(screens)] or screens
+        scr = screens[0]
+        geom = scr.availableGeometry()
+        self.move(geom.center() - self.rect().center())
         layout = QVBoxLayout(self)
         layout.addWidget(self.l1)
         layout.addWidget(self.ttext)
@@ -123,9 +131,10 @@ def show_wfm(text: str, targetreps: int):
             _ACTIVE_DIALOGS.remove(wfm)
 
     wfm.destroyed.connect(_forget)
-
-
-if __name__ == "__main__":
-    app = QApplication(sys.argv)
-    show_wfm("test text", 5)
-    sys.exit(app.exec())
+    
+def close_all_wfm() -> None:
+    for dlg in list(_ACTIVE_DIALOGS):
+        try:
+            dlg.close()
+        except Exception:
+            pass
