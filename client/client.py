@@ -97,7 +97,7 @@ class ClientConfig:
     pet_names: list[str] | None = None
     default_audio_url: str | None = None
     default_overlay_url: str | None = None
-    default_overlay_opacity: float = 1.0
+    default_overlay_opacity: float = 0.3
     default_overlay_screen: int = -1
     popup_sfx_path: str | None = None
     image_save_enabled: bool = True
@@ -343,7 +343,7 @@ def first_run_setup() -> ClientConfig:
 
 # Same for overlay.
         default_overlay_url="https://pub-6dd573008dee4009bea8855056470713.r2.dev/OMD/mommy1.gif",
-        default_overlay_opacity=0.9,
+        default_overlay_opacity=0.3,
         default_overlay_screen=-1,
         tier = "free"
     )
@@ -631,7 +631,7 @@ def main() -> None:
     cfg.pet_names = cfg.pet_names or ["pet", "toy", "darling", "sweetheart"]
     cfg.default_overlay_url = cfg.default_overlay_url or "https://pub-6dd573008dee4009bea8855056470713.r2.dev/OMD/mommy1.gif"
     cfg.default_audio_url = cfg.default_audio_url or "https://pub-6dd573008dee4009bea8855056470713.r2.dev/OMD/myNoise_BinauralBeats_63000063000000000000_0_5%20(1).mp3"
-    cfg.default_overlay_opacity = getattr(cfg, "default_overlay_opacity", 0.9)
+    cfg.default_overlay_opacity = getattr(cfg, "default_overlay_opacity", 0.3)
     cfg.default_overlay_screen = getattr(cfg, "default_overlay_screen", -1)
     cfg.popup_sfx_path = cfg.popup_sfx_path or resource_path("popup.wav")
     default_pics = Path.home() / "Pictures" / "LMI"

@@ -17,7 +17,26 @@
       <li><b>Version:</b> {{ device.version }}</li>
       <li><b>Device ID:</b> <code>{{ device.device_id }}</code></li>
       <li><b>Last seen:</b> {{ device.last_seen }}</li>
+      <li><b>Tier:</b> {{ device.tier }}</li>
     </ul>
+
+    <h2>Tier</h2>
+
+    <form
+      hx-post="/device/{{ device.device_id }}/tier"
+      hx-target="#tier-result"
+      hx-swap="innerHTML"
+    >
+      <label>Set tier:</label>
+      <select name="tier">
+        <option value="free" {% if device.tier == "free" %}selected{% endif %}>free</option>
+        <option value="paid" {% if device.tier == "paid" %}selected{% endif %}>paid</option>
+      </select>
+
+      <button type="submit">Update</button>
+    </form>
+
+    <div id="tier-result" style="margin-top: 8px;"></div>
 
     <h2>Send Message</h2>
 
