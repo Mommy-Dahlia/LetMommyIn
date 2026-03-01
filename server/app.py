@@ -8,19 +8,56 @@ Created on Wed Jan 21 10:32:03 2026
 import json
 import time
 import uuid
+import csv
+import io
+import random
+from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Dict
 import sqlite3
 import hashlib
 import secrets
+import TheFactory
 
 from fastapi import FastAPI, APIRouter, Request, WebSocket, WebSocketDisconnect, HTTPException, Form, UploadFile, File, Body
 from fastapi.responses import HTMLResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
-PROTOCOL_VERSION = "v0.1"
+_ET = ZoneInfo("America/New_York")
+PROTOCOL_VERSION = "v0.2"
 MAX_LOG_EVENTS = 1000
+
+def fmt_unix_et(ts: int | float | str | None) -> str:
+    """
+    Convert unix seconds -> US Eastern time string.
+    """
+    if ts is None:
+        return ""
+    try:
+        ts_f = float(ts)
+    except Exception:
+        return str(ts)
+    dt = datetime.fromtimestamp(ts_f, tz=_ET)
+    return dt.strftime("%Y-%m-%d %I:%M:%S %p %Z")
+
+def as_ts(v) -> float:
+    try:
+        return float(v)
+    except Exception:
+        return 0.0
+
+def _try_alter(conn: sqlite3.Connection, sql: str) -> None:
+    """
+    Best-effort SQLite migration helper.
+    SQLite raises OperationalError if the column already exists.
+    """
+    try:
+        conn.execute(sql)
+    except sqlite3.OperationalError:
+        pass
 
 def init_db() -> None:
     with sqlite3.connect(DB_PATH) as conn:
@@ -50,6 +87,60 @@ def init_db() -> None:
             device_name TEXT
         );
         """)
+        
+        # app.py — inside init_db()
+        
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS blocks (
+            title TEXT PRIMARY KEY,
+            summary TEXT,
+            tags_json TEXT NOT NULL DEFAULT '[]',
+            intensity INTEGER,
+            body TEXT NOT NULL
+        );
+        """)
+        
+        # --- Sessions (server-saved mixes) ---
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS sessions (
+            title TEXT PRIMARY KEY,
+            summary TEXT NOT NULL DEFAULT '',
+            tags_json TEXT NOT NULL DEFAULT '[]',
+            intensity INTEGER,
+            plan_json TEXT NOT NULL
+        );
+        """)
+        
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS pending_deliveries (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            device_id TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            delivered_at INTEGER
+        );
+        """)
+        
+        # Broadcast history (for "send to all" / "send to paid" catch-up)
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS broadcast_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            audience TEXT NOT NULL,          -- 'all' or 'paid'
+            payload_json TEXT NOT NULL,
+            created_at INTEGER NOT NULL
+        );
+        """)
+
+        # Per-device cursor into broadcast history
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS device_broadcast_state (
+            device_id TEXT PRIMARY KEY,
+            last_all_id INTEGER NOT NULL DEFAULT 0,
+            last_paid_id INTEGER NOT NULL DEFAULT 0
+        );
+        """)
+        
+        _try_alter(conn, "ALTER TABLE devices ADD COLUMN tier TEXT NOT NULL DEFAULT 'free';")
 
         conn.commit()
 
@@ -64,6 +155,213 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 
 def sha256_hex(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+def normalize_newlines(text: str) -> str:
+    return (text or "").replace("\r\n", "\n").replace("\r", "\n")
+
+def normalize_tags_csv(tags_str: str) -> list[str]:
+    # "a, b, c" -> ["a", "b", "c"] (lowercase, dedupe)
+    raw = (tags_str or "").replace(";", ",")
+    items = [t.strip().lower() for t in raw.split(",") if t.strip()]
+    out: list[str] = []
+    seen = set()
+    for t in items:
+        if t not in seen:
+            seen.add(t)
+            out.append(t)
+    return out
+
+def _json_dumps(obj) -> str:
+    return json.dumps(obj, ensure_ascii=False)
+
+def _json_loads(s: str):
+    try:
+        return json.loads(s)
+    except Exception:
+        return None
+
+def block_exists(title: str) -> bool:
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute("SELECT 1 FROM blocks WHERE title = ?", (title,)).fetchone()
+        return row is not None
+    
+def load_block_lines_from_db(title: str) -> list[str]:
+    """
+    Load a block by *title* (PK) and return its body as a list of lines.
+
+    - Raises KeyError if the block doesn't exist
+    - Normalizes newlines so compilation behaves consistently across platforms
+    """
+    title = (title or "").strip()
+    if not title:
+        raise ValueError("block title is required")
+
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            "SELECT body FROM blocks WHERE title = ?",
+            (title,),
+        ).fetchone()
+
+    if not row:
+        raise KeyError(f"Unknown block: {title}")
+
+    body = row[0] or ""
+    body = normalize_newlines(body)
+
+    # splitlines() drops the trailing empty line if the file ends with \n.
+    # That's fine for your use-case; if you ever need to preserve it, we can adjust.
+    lines = body.splitlines()
+
+    return lines
+
+def upsert_block(*, title: str, summary: str | None, tags: list[str], intensity: int | None, body: str, overwrite: bool) -> tuple[bool, bool]:
+    """
+    Returns (created, overwritten).
+    - If exists and overwrite=False -> raises HTTPException(409)
+    """
+    title = (title or "").strip()
+    if not title:
+        raise HTTPException(status_code=400, detail="title is required")
+
+    body = normalize_newlines(body)
+    if not body.strip():
+        raise HTTPException(status_code=400, detail="body must be non-empty")
+
+    if block_exists(title) and not overwrite:
+        raise HTTPException(status_code=409, detail=f"Block '{title}' already exists. Re-submit with overwrite=1 to replace it.")
+
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("""
+        INSERT INTO blocks (title, summary, tags_json, intensity, body)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(title) DO UPDATE SET
+            summary=excluded.summary,
+            tags_json=excluded.tags_json,
+            intensity=excluded.intensity,
+            body=excluded.body
+        """, (title, (summary or "").strip() or None, _json_dumps(tags or []), intensity, body))
+        conn.commit()
+
+    # We can’t easily distinguish created vs updated without an extra query; keep it simple:
+    return (False, bool(overwrite))
+
+def session_exists(title: str) -> bool:
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute("SELECT 1 FROM sessions WHERE title = ?", (title,)).fetchone()
+        return row is not None
+
+def upsert_session(*, title: str, summary: str, tags: list[str], intensity: int | None, plan: dict, overwrite: bool) -> None:
+    title = (title or "").strip()
+    if not title:
+        raise HTTPException(status_code=400, detail="title is required")
+
+    if session_exists(title) and not overwrite:
+        raise HTTPException(status_code=409, detail=f"Session '{title}' already exists. Re-submit with overwrite=1 to replace it.")
+
+    tags = [t.strip().lower() for t in (tags or []) if t and t.strip()]
+    plan_json = json.dumps(plan, ensure_ascii=False)
+    tags_json = json.dumps(tags, ensure_ascii=False)
+
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("""
+        INSERT INTO sessions (title, summary, tags_json, intensity, plan_json)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(title) DO UPDATE SET
+            summary=excluded.summary,
+            tags_json=excluded.tags_json,
+            intensity=excluded.intensity,
+            plan_json=excluded.plan_json
+        """, (title, summary or "", tags_json, intensity, plan_json))
+        conn.commit()
+        
+def get_session_meta_by_title(title: str) -> dict | None:
+    """
+    Returns {"title","summary","tags","intensity","plan"} or None.
+
+    Note: sessions table stores tags_json + plan_json (no chosen_blocks column).
+    """
+    title = (title or "").strip()
+    if not title:
+        return None
+
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT title, summary, tags_json, intensity, plan_json FROM sessions WHERE title = ?",
+            (title,),
+        ).fetchone()
+
+    if not row:
+        return None
+
+    try:
+        tags = json.loads(row["tags_json"] or "[]")
+    except Exception:
+        tags = []
+
+    try:
+        plan = json.loads(row["plan_json"])
+    except Exception:
+        plan = {"plan": []}
+
+    return {
+        "title": row["title"],
+        "summary": row["summary"] or "",
+        "tags": tags if isinstance(tags, list) else [],
+        "intensity": row["intensity"],
+        "plan": plan,
+    }
+
+def list_sessions() -> list[dict]:
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute("""
+            SELECT title, summary, tags_json, intensity
+            FROM sessions
+            ORDER BY title COLLATE NOCASE
+        """).fetchall()
+
+    out = []
+    for (title, summary, tags_json, intensity) in rows:
+        try:
+            tags = json.loads(tags_json or "[]")
+        except Exception:
+            tags = []
+        out.append({
+            "title": title,
+            "summary": summary or "",
+            "tags": tags if isinstance(tags, list) else [],
+            "intensity": intensity,
+        })
+    return out
+
+def list_blocks() -> list[dict]:
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute("""
+            SELECT title, summary, tags_json, intensity
+            FROM blocks
+            ORDER BY title COLLATE NOCASE
+        """).fetchall()
+
+    out = []
+    for (title, summary, tags_json, intensity) in rows:
+        try:
+            tags = json.loads(tags_json or "[]")
+        except Exception:
+            tags = []
+        out.append({
+            "title": title,
+            "summary": summary or "",
+            "tags": tags if isinstance(tags, list) else [],
+            "intensity": intensity,
+        })
+    return out
+
+def load_session_plan(title: str) -> dict:
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute("SELECT plan_json FROM sessions WHERE title = ?", (title,)).fetchone()
+    if not row:
+        raise KeyError(f"Unknown session: {title}")
+    return json.loads(row[0])
 
 def create_enroll_code(ttl_seconds: int = 15 * 60) -> tuple[str, int]:
     """
@@ -86,14 +384,621 @@ def create_enroll_code(ttl_seconds: int = 15 * 60) -> tuple[str, int]:
 
     return raw_code, expires_at
 
+def compile_plan_to_steps(plan: dict) -> tuple[list[dict], list[str]]:
+    """
+    Returns (steps, chosen_blocks)
+    steps is a JSON-serializable list[dict] suitable for session_start payload["body"]
+    """
+    if not isinstance(plan, dict):
+        raise ValueError("plan must be an object")
+    items = plan.get("plan")
+    if not isinstance(items, list):
+        raise ValueError("plan.plan must be a list")
+
+    seed = plan.get("seed", None)
+    rng = random.Random(seed)
+
+    chosen_blocks: list[str] = []
+    out_lines: list[str] = []
+
+    for item in items:
+        if not isinstance(item, dict):
+            raise ValueError("each plan item must be an object")
+
+        if "include" in item:
+            name = str(item["include"])
+            chosen_blocks.append(name)
+            out_lines.extend(load_block_lines_from_db(name))  # <-- you provide this
+            continue
+
+        if "lines" in item:
+            lines = item["lines"]
+            if not isinstance(lines, list) or not all(isinstance(x, str) for x in lines):
+                raise ValueError("lines must be a list[str]")
+            out_lines.extend(lines)
+            continue
+
+        if "choose" in item:
+            spec = item["choose"]
+            if not isinstance(spec, dict):
+                raise ValueError("choose must be an object")
+            names = spec.get("from")
+            if not isinstance(names, list) or not names:
+                raise ValueError("choose.from must be a non-empty list")
+
+            min_n = int(spec.get("min", 1))
+            max_n = int(spec.get("max", min_n))
+            names = [str(x) for x in names]
+
+            if max_n > len(names):
+                max_n = len(names)
+            if min_n < 0 or max_n < min_n:
+                raise ValueError("invalid choose min/max")
+
+            n = rng.randint(min_n, max_n)
+            picks = rng.sample(names, n)
+            chosen_blocks.extend(picks)
+            for b in picks:
+                out_lines.extend(load_block_lines_from_db(b))  # <-- you provide this
+            continue
+
+        raise ValueError(f"unknown plan item keys: {list(item.keys())}")
+
+    # ---- compile into timed steps (mirrors local pipeline) ----
+    lines, delays = TheFactory.extract_delays(out_lines)
+    steps = TheFactory.wrap_output(lines, delays)
+    TheFactory.ensure_timer_s_everywhere(steps)
+    steps = TheFactory.apply_effect_scoping(steps)
+
+    return steps, chosen_blocks
+
+def compile_script_to_steps(script_text: str) -> list[dict]:
+    """
+    Takes a raw script (multi-line text), applies TheFactory delay extraction and wrapping,
+    returns steps list suitable for session_start.
+    """
+    text = normalize_newlines(script_text or "")
+    lines = text.splitlines()
+
+    lines, delays = TheFactory.extract_delays(lines)
+    steps = TheFactory.wrap_output(lines, delays)
+    TheFactory.ensure_timer_s_everywhere(steps)
+    steps = TheFactory.apply_effect_scoping(steps)
+    return steps
+
+def compile_plan_to_script_lines(plan_obj: dict) -> tuple[list[str], list[str]]:
+    """
+    Returns (script_lines, chosen_blocks) without wrapping into steps.
+    """
+    if not isinstance(plan_obj, dict):
+        raise ValueError("plan must be an object")
+    items = plan_obj.get("plan")
+    if not isinstance(items, list):
+        raise ValueError("plan.plan must be a list")
+
+    seed = plan_obj.get("seed", None)
+    rng = random.Random(seed)
+
+    chosen_blocks: list[str] = []
+    out_lines: list[str] = []
+
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+
+        if "include" in item:
+            title = str(item["include"])
+            chosen_blocks.append(title)
+            out_lines.extend(load_block_lines_from_db(title))
+            out_lines.append("")
+            continue
+
+        if "lines" in item:
+            lines = item["lines"]
+            if isinstance(lines, list):
+                out_lines.extend([str(x) for x in lines])
+                out_lines.append("")
+            continue
+
+        if "choose" in item and isinstance(item["choose"], dict):
+            frm = item["choose"].get("from") or []
+            frm = [str(x) for x in frm]
+            min_n = int(item["choose"].get("min", 1))
+            max_n = int(item["choose"].get("max", min_n))
+            max_n = min(max_n, len(frm))
+            n = rng.randint(min_n, max_n)
+            picks = rng.sample(frm, n)
+            chosen_blocks.extend(picks)
+            for t in picks:
+                out_lines.extend(load_block_lines_from_db(t))
+                out_lines.append("")
+            continue
+
+    return out_lines, chosen_blocks
+
+SESSION_TAG_EXCLUDE = {"induction", "deepener", "training", "dream", "ending"}
+
+def compute_session_meta_from_plan(plan: dict) -> tuple[list[str], int | None]:
+    """
+    Returns (tags, intensity_max) based on blocks referenced in the plan.
+    For choose groups, we use *all* candidates in choose.from (max-of-possible).
+    """
+    if not isinstance(plan, dict):
+        raise ValueError("plan must be an object")
+
+    items = plan.get("plan")
+    if not isinstance(items, list):
+        raise ValueError("plan.plan must be a list")
+
+    # Gather referenced block titles
+    referenced: set[str] = set()
+
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        if "include" in item:
+            referenced.add(str(item["include"]))
+        elif "choose" in item and isinstance(item["choose"], dict):
+            frm = item["choose"].get("from")
+            if isinstance(frm, list):
+                for x in frm:
+                    referenced.add(str(x))
+
+    # Pull tags + intensities from DB
+    tags_union: set[str] = set()
+    intensity_max: int | None = None
+
+    with sqlite3.connect(DB_PATH) as conn:
+        for title in sorted(referenced):
+            row = conn.execute(
+                "SELECT tags_json, intensity FROM blocks WHERE title = ?",
+                (title,),
+            ).fetchone()
+            if not row:
+                # Let compile fail later; but saving should also fail loudly
+                raise KeyError(f"Unknown block: {title}")
+
+            tags = _json_loads(row[0]) or []
+            if isinstance(tags, list):
+                for t in tags:
+                    tt = (str(t) or "").strip().lower()
+                    if tt and tt not in SESSION_TAG_EXCLUDE:
+                        tags_union.add(tt)
+
+            if row[1] is not None:
+                try:
+                    val = int(row[1])
+                    intensity_max = val if intensity_max is None else max(intensity_max, val)
+                except Exception:
+                    pass
+
+    return (sorted(tags_union), intensity_max)
+
+def queue_delivery(device_id: str, payload: dict) -> None:
+    now = int(time.time())
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            "INSERT INTO pending_deliveries (device_id, payload_json, created_at) VALUES (?, ?, ?)",
+            (device_id, _json_dumps(payload), now),
+        )
+        conn.commit()
+        
+async def drain_pending_deliveries(device_id: str, ws: WebSocket) -> None:
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute(
+            "SELECT id, payload_json FROM pending_deliveries WHERE device_id = ? AND delivered_at IS NULL ORDER BY id ASC",
+            (device_id,),
+        ).fetchall()
+
+    for delivery_id, payload_json in rows:
+        payload = _json_loads(payload_json) or {}
+        await ws.send_json(payload)  # use your existing send method if different
+
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute(
+                "UPDATE pending_deliveries SET delivered_at = ? WHERE id = ?",
+                (int(time.time()), delivery_id),
+            )
+            conn.commit()
+            
+async def replay_broadcast_history(device_id: str, ws: WebSocket) -> None:
+    """
+    Sends any missed broadcast_events to this device, then advances its cursor.
+    """
+    ensure_device_broadcast_state(device_id)
+    last_all, last_paid = get_device_broadcast_cursor(device_id)
+
+    # Always replay "all"
+    all_events = load_broadcast_events_since(audience="all", after_id=last_all)
+    max_all = last_all
+    for eid, payload in all_events:
+        await ws.send_json(payload)
+        max_all = eid
+
+    # Replay "paid" only if device is currently paid
+    tier = get_device_tier(device_id)
+    max_paid = last_paid
+    if tier == "paid":
+        paid_events = load_broadcast_events_since(audience="paid", after_id=last_paid)
+        for eid, payload in paid_events:
+            await ws.send_json(payload)
+            max_paid = eid
+
+    # Advance cursors only after successful sends
+    if max_all != last_all or max_paid != last_paid:
+        set_device_broadcast_cursor(device_id, last_all_id=max_all, last_paid_id=max_paid)
+            
+def record_broadcast_event(audience: str, payload: dict) -> int:
+    """
+    Persists a broadcast event and returns its autoincrement id.
+    audience: 'all' | 'paid'
+    """
+    audience = (audience or "").strip().lower()
+    if audience not in ("all", "paid"):
+        raise ValueError("audience must be 'all' or 'paid'")
+
+    now = int(time.time())
+    with sqlite3.connect(DB_PATH) as conn:
+        cur = conn.execute(
+            "INSERT INTO broadcast_events (audience, payload_json, created_at) VALUES (?, ?, ?)",
+            (audience, _json_dumps(payload), now),
+        )
+        conn.commit()
+        return int(cur.lastrowid)
+    
+def ensure_device_broadcast_state(device_id: str) -> None:
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO device_broadcast_state (device_id, last_all_id, last_paid_id) VALUES (?, 0, 0)",
+            (device_id,),
+        )
+        conn.commit()
+        
+def load_broadcast_events_since(*, audience: str, after_id: int) -> list[tuple[int, dict]]:
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute(
+            "SELECT id, payload_json FROM broadcast_events WHERE audience = ? AND id > ? ORDER BY id ASC",
+            (audience, int(after_id)),
+        ).fetchall()
+
+    out: list[tuple[int, dict]] = []
+    for eid, payload_json in rows:
+        payload = _json_loads(payload_json) or {}
+        out.append((int(eid), payload))
+    return out
+
+def get_device_broadcast_cursor(device_id: str) -> tuple[int, int]:
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            "SELECT last_all_id, last_paid_id FROM device_broadcast_state WHERE device_id = ?",
+            (device_id,),
+        ).fetchone()
+    if not row:
+        return (0, 0)
+    return (int(row[0]), int(row[1]))
+
+def set_device_broadcast_cursor(device_id: str, *, last_all_id: int | None = None, last_paid_id: int | None = None) -> None:
+    fields = []
+    vals = []
+    if last_all_id is not None:
+        fields.append("last_all_id = ?")
+        vals.append(int(last_all_id))
+    if last_paid_id is not None:
+        fields.append("last_paid_id = ?")
+        vals.append(int(last_paid_id))
+    if not fields:
+        return
+
+    vals.append(device_id)
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            f"UPDATE device_broadcast_state SET {', '.join(fields)} WHERE device_id = ?",
+            tuple(vals),
+        )
+        conn.commit()
+            
+def build_inject_block_payload(title: str) -> dict:
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            "SELECT title, summary, tags_json, intensity, body FROM blocks WHERE title = ?",
+            (title,),
+        ).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail=f"Unknown block: {title}")
+
+    _title, summary, tags_json, intensity, body = row
+    tags = _json_loads(tags_json) or []
+    return {
+        "type": "inject_block",
+        "title": _title,
+        "summary": summary or "",
+        "tags": tags if isinstance(tags, list) else [],
+        "intensity": intensity,
+        "body": body or "",
+    }
+
+def build_inject_session_payload(title: str) -> dict:
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            "SELECT title, summary, tags_json, intensity, plan_json FROM sessions WHERE title = ?",
+            (title,),
+        ).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail=f"Unknown session: {title}")
+
+    _title, summary, tags_json, intensity, plan_json = row
+    tags = _json_loads(tags_json) or []
+    plan_obj = _json_loads(plan_json) or {}
+
+    session_json = {
+        "name": _title,
+        "plan": plan_obj.get("plan") or [],
+        "seed": plan_obj.get("seed", None),
+    }
+
+    return {
+        "type": "inject_session",
+        "title": _title,
+        "summary": summary or "",
+        "tags": tags if isinstance(tags, list) else [],
+        "intensity": intensity,
+        "session_json": session_json,
+    }
+
+def resolve_target_device_ids(*, target: str, device_ids_csv: str | None = None) -> list[str]:
+    """
+    target:
+      - "device": use device_ids_csv (1+ ids)
+      - "all": all known devices
+      - "paid": devices where tier == 'paid'
+    """
+    t = (target or "").strip().lower()
+
+    if t == "device":
+        ids = [x.strip() for x in (device_ids_csv or "").split(",") if x.strip()]
+        if not ids:
+            raise HTTPException(status_code=400, detail="device_ids is required when target=device")
+        return ids
+
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+
+        if t == "all":
+            rows = conn.execute("SELECT device_id FROM devices").fetchall()
+            return [r["device_id"] for r in rows]
+
+        if t == "paid":
+            rows = conn.execute("SELECT device_id FROM devices WHERE tier='paid'").fetchall()
+            return [r["device_id"] for r in rows]
+
+    raise HTTPException(status_code=400, detail="target must be one of: device, all, paid")
+    
+async def push_or_queue_injection(*, device_id: str, payload: dict) -> None:
+    """
+    If online -> send immediately.
+    If offline -> enqueue in pending_deliveries (your Step 1–6 work).
+    """
+    if device_id in hub.connections:
+        ws = hub.connections[device_id]
+        await ws.send_text(json.dumps(payload))
+        hub.log(device_id, "sent", detail=f"injection {payload.get('type')}", command_id=payload.get("id"))
+        return
+
+    # offline: queue it (replace enqueue_pending_delivery with your actual helper)
+    queue_delivery(device_id=device_id, payload=payload)
+    hub.log(device_id, "queued", detail=f"injection {payload.get('type')}", command_id=payload.get("id"))
+
 @admin_router.post("/enroll/create")
 def admin_create_enroll_code(ttl_minutes: int = 15):
     ttl_seconds = ttl_minutes * 60
     code, expires_at = create_enroll_code(ttl_seconds=ttl_seconds)
     return {"code": code, "expires_at": expires_at}
 
-app.include_router(admin_router)
+@admin_router.get("/devices")
+def admin_list_devices():
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute(
+            "SELECT device_id, username, device_name, tier, last_seen FROM devices ORDER BY last_seen DESC",
+        ).fetchall()
 
+    return {
+        "devices": [
+            {
+                "device_id": r[0],
+                "username": r[1],
+                "device_name": r[2],
+                "tier": (r[3] or "free"),
+                "last_seen": r[4],
+            }
+            for r in rows
+        ]
+    }
+
+@admin_router.post("/device/{device_id}/tier")
+async def admin_set_tier(device_id: str, tier: str = Form(...)):
+    try:
+        set_device_tier(device_id, tier)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    pushed = await push_tier_update(device_id)
+    return {
+        "ok": True,
+        "device_id": device_id,
+        "tier": tier.strip().lower(),
+        "pushed_live": pushed,
+    }
+
+@admin_router.get("/blocks")
+def admin_blocks_list():
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute("""
+            SELECT title, summary, tags_json, intensity
+            FROM blocks
+            ORDER BY title COLLATE NOCASE
+        """).fetchall()
+
+    blocks = []
+    for (title, summary, tags_json, intensity) in rows:
+        tags = _json_loads(tags_json) or []
+        if not isinstance(tags, list):
+            tags = []
+        blocks.append({
+            "title": title,
+            "summary": summary or "",
+            "tags": tags,
+            "intensity": intensity,
+        })
+    return {"blocks": blocks}
+
+@admin_router.get("/blocks/preview")
+def admin_blocks_preview(title: str):
+    title = (title or "").strip()
+    if not title:
+        raise HTTPException(status_code=400, detail="title is required")
+
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            "SELECT body FROM blocks WHERE title = ?",
+            (title,),
+        ).fetchone()
+
+    if not row:
+        raise HTTPException(status_code=404, detail=f"Unknown block: {title}")
+
+    body = normalize_newlines(row[0] or "")
+    return PlainTextResponse(body)
+
+@admin_router.post("/blocks/save")
+def admin_blocks_save(
+    title: str = Form(...),
+    summary: str = Form(""),
+    tags: str = Form(""),
+    intensity: str = Form(""),
+    body: str = Form(...),
+    overwrite: str = Form("0"),
+):
+    overwrite_flag = overwrite.strip() in ("1", "true", "yes", "on")
+    tag_list = normalize_tags_csv(tags)
+
+    intensity_val: int | None = None
+    if intensity.strip() != "":
+        try:
+            intensity_val = int(intensity.strip())
+        except Exception:
+            return PlainTextResponse("intensity must be an integer (or blank).", status_code=400)
+
+    try:
+        _created, _overwritten = upsert_block(
+            title=title,
+            summary=summary,
+            tags=tag_list,
+            intensity=intensity_val,
+            body=body,
+            overwrite=overwrite_flag,
+        )
+    except HTTPException as e:
+        # For HTMX confirmation UX, return plain text that includes a hint + keep 409
+        return PlainTextResponse(str(e.detail), status_code=e.status_code)
+
+    return PlainTextResponse(f"Saved block: {title}")
+
+@admin_router.post("/blocks/bulk_upload")
+async def admin_blocks_bulk_upload(
+    csv_file: UploadFile = File(...),
+    txt_files: list[UploadFile] = File(...),
+    overwrite: str = Form("0"),
+):
+    overwrite_flag = overwrite.strip() in ("1", "true", "yes", "on")
+
+    # 1) read CSV
+    csv_raw = (await csv_file.read()).decode("utf-8", errors="replace")
+    reader = csv.DictReader(io.StringIO(csv_raw))
+    required = {"title", "summary", "tags", "intensity"}
+    if not required.issubset(set([h.strip() for h in (reader.fieldnames or [])])):
+        return PlainTextResponse(f"CSV must contain columns: {sorted(required)}", status_code=400)
+
+    meta_by_title: dict[str, dict] = {}
+    filename_to_title: dict[str, str] = {}
+
+    for row in reader:
+        title = (row.get("title") or "").strip()
+        if not title:
+            continue
+
+        meta_by_title[title] = {
+            "summary": (row.get("summary") or "").strip(),
+            "tags": normalize_tags_csv(row.get("tags") or ""),
+            "intensity": (row.get("intensity") or "").strip(),
+        }
+
+        fn = (row.get("filename") or "").strip()
+        if fn:
+            filename_to_title[fn] = title
+
+    # 2) preflight duplicates (so we can return a single confirmation list)
+    duplicates: list[str] = []
+    for f in txt_files:
+        original_name = (f.filename or "").strip()
+        stem = Path(original_name).stem
+        title = filename_to_title.get(original_name) or stem
+
+        if title and block_exists(title):
+            duplicates.append(title)
+
+    if duplicates and not overwrite_flag:
+        dup_txt = "\n".join(f"- {t}" for t in sorted(set(duplicates)))
+        return PlainTextResponse(
+            "Duplicate titles detected (will overwrite existing blocks):\n"
+            f"{dup_txt}\n\nRe-submit with overwrite=1 to confirm.",
+            status_code=409,
+        )
+
+    # 3) ingest
+    saved = 0
+    skipped = 0
+    errors: list[str] = []
+
+    for f in txt_files:
+        original_name = (f.filename or "").strip()
+        stem = Path(original_name).stem
+        title = filename_to_title.get(original_name) or stem
+
+        meta = meta_by_title.get(title)
+        if meta is None:
+            skipped += 1
+            continue
+
+        body = (await f.read()).decode("utf-8", errors="replace")
+
+        intensity_val: int | None = None
+        if meta["intensity"] != "":
+            try:
+                intensity_val = int(meta["intensity"])
+            except Exception:
+                errors.append(f"{title}: bad intensity '{meta['intensity']}'")
+                continue
+
+        try:
+            upsert_block(
+                title=title,
+                summary=meta["summary"],
+                tags=meta["tags"],
+                intensity=intensity_val,
+                body=body,
+                overwrite=True,  # bulk path already confirmed overwrite behavior
+            )
+            saved += 1
+        except Exception as e:
+            errors.append(f"{title}: {repr(e)}")
+
+    # 4) response
+    msg = f"Bulk upload complete. saved={saved} skipped_no_csv_row={skipped} errors={len(errors)}"
+    if errors:
+        msg += "\n\nErrors:\n" + "\n".join(errors[:50])
+    return PlainTextResponse(msg)
+
+app.include_router(admin_router)
 
 def consume_enroll_code(raw_code: str) -> bool:
     """
@@ -176,6 +1081,35 @@ def update_device_metadata(device_id: str, username: str | None, device_name: st
             )
         conn.commit()
 
+def get_device_tier(device_id: str) -> str:
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            "SELECT tier FROM devices WHERE device_id = ?",
+            (device_id,),
+        ).fetchone()
+    return (row[0] if row and row[0] else "free").strip().lower()
+
+def set_device_tier(device_id: str, tier: str) -> None:
+    tier = (tier or "").strip().lower()
+    if tier not in ("free", "paid"):
+        raise ValueError("tier must be 'free' or 'paid'")
+
+    with sqlite3.connect(DB_PATH) as conn:
+        cur = conn.execute(
+            "UPDATE devices SET tier = ? WHERE device_id = ?",
+            (tier, device_id),
+        )
+        conn.commit()
+
+    if cur.rowcount != 1:
+        raise ValueError(f"Unknown device_id: {device_id}")
+
+def require_paid(device_id: str) -> None:
+    tier = get_device_tier(device_id)
+    if tier != "paid":
+        # 402 is “Payment Required” (rarely used, but semantically correct).
+        # 403 is also reasonable. Pick one and stay consistent.
+        raise HTTPException(status_code=402, detail="This feature requires a paid tier.")
 
 @app.get("/health")
 def health():
@@ -273,22 +1207,43 @@ class Hub:
             
 hub = Hub()
 
+async def push_tier_update(device_id: str) -> bool:
+    """
+    If the device is currently connected, send a live tier update.
+    Returns True if pushed, False if device is offline.
+    """
+    ws = hub.connections.get(device_id)
+    if ws is None:
+        return False
+
+    tier = get_device_tier(device_id)
+    await ws.send_text(json.dumps({
+        "type": "tier",
+        "tier": tier,
+    }))
+
+    hub.log(device_id, "sent", detail=f"tier {tier}", command_id="tier")
+    return True
+
 @app.get("/devices")
 def get_devices():
     items = []
     for d in hub.devices.values():
+        last_seen_ts = as_ts(d.last_seen)
         items.append({
             "device_id": d.device_id,
             "username": d.username,
             "device_name": d.device_name,
             "version": d.version,
             "connected_at": d.connected_at,
-            "last_seen": d.last_seen,
+            "last_seen_ts": last_seen_ts,
+            "last_seen": fmt_unix_et(last_seen_ts),
             "online": d.device_id in hub.connections,
+            "tier": get_device_tier(d.device_id),
         })
 
     # Sort: online first, then most recently seen
-    items.sort(key=lambda x: (not x["online"], -x["last_seen"]))
+    items.sort(key=lambda x: (not x["online"], -x["last_seen_ts"]))
     return {"devices": items}
 
 @app.get("/device/{device_id}", response_class=HTMLResponse)
@@ -296,40 +1251,169 @@ def device_page(request: Request, device_id: str):
     d = hub.devices.get(device_id)
     if not d:
         raise HTTPException(status_code=404, detail="Unknown device")
-
+    last_seen_ts = as_ts(d.last_seen)
     device = {
         "device_id": d.device_id,
         "username": d.username,
         "device_name": d.device_name,
         "version": d.version,
         "connected_at": d.connected_at,
-        "last_seen": d.last_seen,
+        "last_seen_ts": last_seen_ts,
+        "last_seen": fmt_unix_et(last_seen_ts),
         "online": d.device_id in hub.connections,
+        "tier": get_device_tier(d.device_id),
     }
 
     logs = [l for l in hub.logs if l.device_id == device_id][-50:]
 
     return templates.TemplateResponse(
         "device.html",
-        {"request": request, "device": device, "logs": logs},
+        {"request": request, "device": device, "logs": logs, "sessions": list_sessions(), "blocks": list_blocks()},
     )
 
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request):
     devices = []
     for d in hub.devices.values():
+        last_seen_ts = as_ts(d.last_seen)
+
         devices.append({
             "device_id": d.device_id,
             "username": d.username,
             "device_name": d.device_name,
             "version": d.version,
             "connected_at": d.connected_at,
-            "last_seen": d.last_seen,
+            "last_seen_ts": last_seen_ts,            # NEW
+            "last_seen": fmt_unix_et(last_seen_ts),  # display string
             "online": d.device_id in hub.connections,
         })
 
-    devices.sort(key=lambda x: (not x["online"], -x["last_seen"]))
-    return templates.TemplateResponse("index.html", {"request": request, "devices": devices})
+    devices.sort(key=lambda x: (not x["online"], -x["last_seen_ts"]))
+    return templates.TemplateResponse("index.html", {"request": request, "devices": devices, "sessions": list_sessions(), "blocks": list_blocks()})
+
+@app.get("/sessions", response_class=HTMLResponse)
+def sessions_page(request: Request, load: str = ""):
+    sessions = list_sessions()
+    blocks = list_blocks()
+
+    loaded = {
+        "title": "",
+        "summary": "",
+        "tags": "",
+        "intensity": "",
+        "plan_json": json.dumps({"plan": []}, indent=2, ensure_ascii=False),
+    }
+
+    if load.strip():
+        try:
+            plan = load_session_plan(load.strip())
+            loaded["title"] = load.strip()
+            loaded["plan_json"] = json.dumps(plan, indent=2, ensure_ascii=False)
+
+            meta = next((s for s in sessions if s["title"] == loaded["title"]), None)
+            if meta:
+                loaded["summary"] = meta.get("summary") or ""
+                loaded["tags"] = ", ".join(meta.get("tags") or [])
+                loaded["intensity"] = "" if meta.get("intensity") is None else str(meta["intensity"])
+        except Exception:
+            pass
+
+    return templates.TemplateResponse(
+        "sessions.html",
+        {
+            "request": request,
+            "sessions": sessions,
+            "blocks": blocks,
+            "loaded": loaded,
+        },
+    )
+
+@app.get("/admin/blocks/page", response_class=HTMLResponse)
+def blocks_page(request: Request):
+    return templates.TemplateResponse(
+        "blocks.html",
+        {"request": request, "blocks": list_blocks()},
+    )
+
+@app.post("/sessions/preview")
+def sessions_preview(plan_json: str = Form(...)):
+    try:
+        plan_obj = json.loads(plan_json)
+    except Exception as e:
+        return PlainTextResponse(f"Invalid JSON: {e}", status_code=400)
+
+    try:
+        steps, chosen_blocks = compile_plan_to_steps(plan_obj)
+    except KeyError as e:
+        return PlainTextResponse(str(e), status_code=404)
+    except Exception as e:
+        return PlainTextResponse(f"Compile failed: {e}", status_code=400)
+
+    return PlainTextResponse(
+        "OK\n"
+        f"steps={len(steps)}\n"
+        f"blocks_used={len(chosen_blocks)}\n"
+        f"first_blocks={chosen_blocks[:8]}\n\n"
+        "first_10_steps:\n"
+        + json.dumps(steps[:10], indent=2, ensure_ascii=False)
+    )
+
+@app.post("/sessions/save")
+def sessions_save(
+    title: str = Form(...),
+    summary: str = Form(""),
+    tags: str = Form(""),
+    intensity: str = Form(""),
+    plan_json: str = Form(...),
+    overwrite: str = Form("0"),
+):
+    overwrite_flag = overwrite.strip().lower() in ("1", "true", "yes", "on")
+
+    try:
+        plan_obj = json.loads(plan_json)
+    except Exception as e:
+        return PlainTextResponse(f"Invalid JSON: {e}", status_code=400)
+
+    try:
+        computed_tags, computed_intensity = compute_session_meta_from_plan(plan_obj)
+    except KeyError as e:
+        return PlainTextResponse(str(e), status_code=404)
+    except Exception as e:
+        return PlainTextResponse(f"Meta compute failed: {e}", status_code=400)
+
+    try:
+        upsert_session(
+            title=title,
+            summary=summary,
+            tags=computed_tags,
+            intensity=computed_intensity,
+            plan=plan_obj,
+            overwrite=overwrite_flag,
+        )
+    except HTTPException as e:
+        return PlainTextResponse(str(e.detail), status_code=e.status_code)
+    except Exception as e:
+        return PlainTextResponse(f"Save failed: {e}", status_code=400)
+
+    return PlainTextResponse(f"Saved session: {title}")
+
+@app.post("/device/{device_id}/tier")
+async def set_tier_from_device_page(
+    device_id: str,
+    tier: str = Form(...),
+):
+    try:
+        set_device_tier(device_id, tier)
+    except ValueError as e:
+        return PlainTextResponse(str(e), status_code=400)
+
+    pushed = await push_tier_update(device_id)
+    suffix = " (pushed live)" if pushed else " (device offline)"
+    if pushed and tier.strip().lower() == "paid":
+        ws = hub.connections[device_id]
+        if ws is not None:
+            await replay_broadcast_history(device_id, ws)
+    return PlainTextResponse(f"Tier set to: {tier.strip().lower()}{suffix}")
 
 @app.post("/device/{device_id}/message")
 async def send_message_htmx(
@@ -470,6 +1554,56 @@ async def session_start_htmx(
     await ws.send_text(json.dumps(payload))
 
     hub.log(device_id, "sent", detail=f"session_start file={session_file.filename} steps={len(steps)}", command_id=cmd_id)
+
+    return PlainTextResponse(f"Sent {cmd_id} session_id={session_id}")
+
+@app.post("/device/{device_id}/session/start_saved")
+async def session_start_saved_htmx(
+    device_id: str,
+    session_title: str = Form(...),
+):
+    if device_id not in hub.connections:
+        return PlainTextResponse("Device is offline (no active connection).", status_code=409)
+
+    session_title = (session_title or "").strip()
+    if not session_title:
+        return PlainTextResponse("session_title is required.", status_code=400)
+
+    try:
+        plan = load_session_plan(session_title)
+        steps, chosen_blocks = compile_plan_to_steps(plan)
+    except KeyError:
+        return PlainTextResponse(f"Unknown session: {session_title}", status_code=404)
+    except Exception as e:
+        return PlainTextResponse(f"Compile failed: {e}", status_code=400)
+
+    cmd_id = f"cmd_{uuid.uuid4().hex[:10]}"
+    session_id = f"sess_{uuid.uuid4().hex[:10]}"
+
+    # right after you compute `steps`
+    meta = get_session_meta_by_title(session_title) or {}
+
+    payload = {
+        "type": "session_start",
+        "id": cmd_id,
+        "session_id": f"sess_{uuid.uuid4().hex[:10]}",
+        "body": steps,
+        "title": meta.get("title", session_title),
+        "summary": meta.get("summary", ""),
+        "tags": meta.get("tags", []),
+        "intensity": meta.get("intensity", None),
+        "blocks": chosen_blocks,
+    }
+
+    ws = hub.connections[device_id]
+    await ws.send_text(json.dumps(payload))
+
+    hub.log(
+        device_id,
+        "sent",
+        detail=f"session_start_saved title={session_title} steps={len(steps)} blocks={len(chosen_blocks)}",
+        command_id=cmd_id,
+    )
 
     return PlainTextResponse(f"Sent {cmd_id} session_id={session_id}")
 
@@ -676,6 +1810,115 @@ async def subliminal_stop_htmx(device_id: str):
     hub.log(device_id, "sent", detail="subliminal_stop", command_id=cmd_id)
     return PlainTextResponse(f"Sent {cmd_id}")
 
+@app.post("/device/{device_id}/sessiongen/from_blocks")
+def sessiongen_from_blocks(
+    device_id: str,
+    block_titles: str = Form(""),
+):
+    titles = [t.strip() for t in (block_titles or "").split(",") if t.strip()]
+    if not titles:
+        return PlainTextResponse("", status_code=400)
+
+    out_lines: list[str] = []
+    for title in titles:
+        out_lines.extend(load_block_lines_from_db(title))
+        out_lines.append("")  # spacer line between blocks
+
+    return PlainTextResponse("\n".join(out_lines).strip() + "\n")
+
+@app.post("/device/{device_id}/sessiongen/from_saved_session")
+def sessiongen_from_saved_session(
+    device_id: str,
+    session_title: str = Form(...),
+):
+    plan = load_session_plan(session_title.strip())
+    lines, _chosen = compile_plan_to_script_lines(plan)
+    return PlainTextResponse("\n".join(lines).strip() + "\n")
+
+@app.post("/device/{device_id}/sessiongen/send")
+async def sessiongen_send(
+    device_id: str,
+    title: str = Form("Live Session"),
+    script_text: str = Form(...),
+):
+    if device_id not in hub.connections:
+        return PlainTextResponse("Device is offline (no active connection).", status_code=409)
+
+    steps = compile_script_to_steps(script_text)
+
+    cmd_id = f"cmd_{uuid.uuid4().hex[:10]}"
+    session_id = f"sess_{uuid.uuid4().hex[:10]}"
+
+    payload = {
+        "type": "session_start",
+        "id": cmd_id,
+        "session_id": session_id,
+        "body": steps,
+
+        # metadata for dialog gating on client
+        "title": (title or "Live Session").strip(),     
+        "summary": "",
+        "tags": [],
+        "intensity": None,
+        "blocks": [],
+    }
+
+    ws = hub.connections[device_id]
+    await ws.send_text(json.dumps(payload))
+
+    hub.log(device_id, "sent", detail=f"sessiongen_send steps={len(steps)}", command_id=cmd_id)
+    return PlainTextResponse(f"Sent {cmd_id} ({len(steps)} steps)")
+
+@app.post("/device/{device_id}/inject/block")
+async def inject_block_to_device(device_id: str, block_title: str = Form(...)):
+    payload = build_inject_block_payload(block_title.strip())
+
+    await push_or_queue_injection(device_id=device_id, payload=payload)
+    return PlainTextResponse("OK inject_session → device")
+
+@app.post("/device/{device_id}/inject/session")
+async def inject_session_to_device(device_id: str, session_title: str = Form(...)):
+    payload = build_inject_session_payload(session_title.strip())
+
+    await push_or_queue_injection(device_id=device_id, payload=payload)
+    return PlainTextResponse("OK inject_session → device")
+
+@app.post("/inject/block")
+async def inject_block_broadcast(
+    target: str = Form(...),                 # "device" | "all" | "paid"
+    block_title: str = Form(...),
+    device_ids: str = Form(""),              # only used when target="device"
+):
+    targets = resolve_target_device_ids(target=target, device_ids_csv=device_ids)
+
+    payload = build_inject_block_payload(block_title.strip())
+    
+    if target.strip().lower() in ("all", "paid"):
+        record_broadcast_event(target.strip().lower(), payload)
+
+    for did in targets:
+        await push_or_queue_injection(device_id=did, payload=payload)
+
+    return PlainTextResponse(f"OK inject_block -> {len(targets)} target(s)")
+
+@app.post("/inject/session")
+async def inject_session_broadcast(
+    target: str = Form(...),                 # "device" | "all" | "paid"
+    session_title: str = Form(...),
+    device_ids: str = Form(""),              # only used when target="device"
+):
+    targets = resolve_target_device_ids(target=target, device_ids_csv=device_ids)
+
+    payload = build_inject_session_payload(session_title.strip())
+    
+    if target.strip().lower() in ("all", "paid"):
+        record_broadcast_event(target.strip().lower(), payload)
+
+    for did in targets:
+        await push_or_queue_injection(device_id=did, payload=payload)
+
+    return PlainTextResponse(f"OK inject_session -> {len(targets)} target(s)")
+
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket):
     await ws.accept()
@@ -769,6 +2012,16 @@ async def ws_endpoint(ws: WebSocket):
             version=version,
         )
         hub.register(dev, ws)
+        
+        tier = get_device_tier(device_id)
+
+        await ws.send_text(json.dumps({
+            "type": "tier",
+            "tier": tier,   # "free" or "paid"
+        }))
+        
+        await replay_broadcast_history(device_id, ws)
+        await drain_pending_deliveries(device_id, ws)
 
         # 4) Keep the connection alive (we'll fill this in next chunk)
         while True:

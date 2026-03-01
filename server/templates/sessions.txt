@@ -1,0 +1,287 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Sessions</title>
+    <script src="https://unpkg.com/htmx.org@1.9.12"></script>
+    <style>
+      body { font-family: sans-serif; }
+      .grid { display: grid; grid-template-columns: 1fr 2fr; gap: 16px; }
+      textarea { width: 100%; }
+      .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+      .pill { display: inline-block; padding: 2px 6px; border: 1px solid #ccc; border-radius: 999px; margin-right: 4px; }
+      .muted { color: #666; font-size: 0.9em; }
+      pre { white-space: pre-wrap; }
+      button { cursor: pointer; }
+    </style>
+    <link rel="stylesheet" href="/static/admin.css">
+  </head>
+  <body>
+    <p>
+      <a href="/">← Devices</a> |
+      <a href="/admin/blocks/page">Blocks</a> |
+      <a href="/sessions">Sessions</a>
+    </p>
+
+    <h1>Sessions (Mixer + Save)</h1>
+
+    <div class="grid">
+      <!-- LEFT: sessions + blocks -->
+      <div>
+        <h2>Saved Sessions</h2>
+        <ul>
+          {% for s in sessions %}
+            <li>
+              <a href="/sessions?load={{ s.title }}">{{ s.title }}</a>
+              <div class="muted">{{ s.summary }}</div>
+            </li>
+          {% endfor %}
+        </ul>
+
+        <hr />
+
+        <h2>Blocks</h2>
+        <div class="muted">Click “Add include” to append to the plan.</div>
+        <ul>
+          {% for b in blocks %}
+            <li style="margin-bottom: 12px;">
+              <div>
+                <b>{{ b.title }}</b>
+                {% if b.intensity is not none %}<span class="pill">I={{ b.intensity }}</span>{% endif %}
+              </div>
+              <div class="muted">{{ b.summary }}</div>
+              <div class="row">
+                <button
+                  type="button"
+                  class="block-pick"
+                  data-title="{{ b.title }}"
+                  onclick="togglePick(this)"
+                >
+                  Select
+                </button>
+
+                {% for t in b.tags %}
+                  <span class="pill">{{ t }}</span>
+                {% endfor %}
+              </div>
+            </li>
+          {% endfor %}
+        </ul>
+      </div>
+
+      <!-- RIGHT: editor -->
+      <div>
+        <form
+          id="saveForm"
+          hx-post="/sessions/save"
+          hx-target="#result"
+          hx-swap="innerHTML"
+        >
+          <h2>Metadata</h2>
+          <div class="row">
+            <label>Title<br/>
+              <input name="title" id="title" required style="width: 24rem;"
+                     value="{{ loaded.title }}" />
+            </label>
+
+            <label>
+              <input type="checkbox" name="overwrite" value="1" />
+              Overwrite if title exists
+            </label>
+          </div>
+
+          <p>
+            <label>Summary<br/>
+              <input name="summary" id="summary" style="width: 95%;"
+                     value="{{ loaded.summary }}" />
+            </label>
+          </p>
+
+          <p>
+            <div>
+             <b>Computed intensity:</b> <span id="computed-intensity">{{ loaded.intensity }}</span>
+            </div>
+
+            <div>
+              <b>Computed tags:</b> <span id="computed-tags">{{ loaded.tags }}</span>
+            </div>
+          </p>
+
+          <hr />
+
+          <h2>Phase 2: Mixer Builder</h2>
+          <div class="row">
+            <button type="button" onclick="addSelectedBlocks()">Add selected (include/choose)</button>
+            <button type="button" onclick="clearSelected()">Clear selection</button>
+            <button type="button" onclick="clearPlan()">Clear plan</button>
+          </div>
+          <div class="muted">
+            Select 1 block → adds <code>{"include": "Title"}</code>. Select 2+ blocks → adds a <code>choose</code> group.
+          </div>
+
+          <h3>Current plan items</h3>
+          <ol id="planList"></ol>
+
+          <hr />
+
+          <h2>Phase 1: plan.json</h2>
+          <div class="muted">Phase 2 writes to this box; you can edit JSON directly.</div>
+          <textarea name="plan_json" id="plan_json" rows="16" required>{{ loaded.plan_json }}</textarea>
+
+          <div class="row" style="margin-top: 8px;">
+            <button
+              type="button"
+              hx-post="/sessions/preview"
+              hx-include="#plan_json"
+              hx-target="#preview"
+              hx-swap="innerHTML"
+            >
+              Preview (compile)
+            </button>
+
+            <button type="submit">Save Session</button>
+          </div>
+        </form>
+
+        <h3>Preview</h3>
+        <pre id="preview"></pre>
+
+        <h3>Result</h3>
+        <pre id="result"></pre>
+      </div>
+    </div>
+
+    <script>
+      let planObj = { plan: [] };
+
+      function readPlanFromTextarea() {
+        const txt = document.getElementById("plan_json").value.trim();
+        if (!txt) return { plan: [] };
+        return JSON.parse(txt);
+      }
+
+      function writePlanToTextarea() {
+        document.getElementById("plan_json").value = JSON.stringify(planObj, null, 2);
+      }
+
+      function renderPlanList() {
+        const ol = document.getElementById("planList");
+        ol.innerHTML = "";
+        (planObj.plan || []).forEach((item, idx) => {
+          const li = document.createElement("li");
+          li.style.marginBottom = "6px";
+
+          const row = document.createElement("div");
+          row.className = "row";
+
+          const up = document.createElement("button");
+          up.type = "button";
+          up.textContent = "↑";
+          up.onclick = () => moveItem(idx, -1);
+
+          const down = document.createElement("button");
+          down.type = "button";
+          down.textContent = "↓";
+          down.onclick = () => moveItem(idx, +1);
+
+          const del = document.createElement("button");
+          del.type = "button";
+          del.textContent = "Delete";
+          del.onclick = () => { planObj.plan.splice(idx, 1); sync(); };
+
+          row.appendChild(up); row.appendChild(down); row.appendChild(del);
+
+          const pre = document.createElement("pre");
+          pre.textContent = JSON.stringify(item, null, 2);
+          pre.style.margin = "0";
+
+          li.appendChild(row);
+          li.appendChild(pre);
+          ol.appendChild(li);
+        });
+      }
+
+      function moveItem(idx, delta) {
+        const j = idx + delta;
+        if (j < 0 || j >= planObj.plan.length) return;
+        const tmp = planObj.plan[idx];
+        planObj.plan[idx] = planObj.plan[j];
+        planObj.plan[j] = tmp;
+        sync();
+      }
+
+      function sync() {
+        writePlanToTextarea();
+        renderPlanList();
+      }
+
+      function addLinesPrompt() {
+        const raw = prompt("Paste lines (each newline becomes one line).");
+        if (!raw) return;
+        const lines = raw.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
+        planObj.plan.push({ lines: lines });
+        sync();
+      }
+
+      function togglePick(btn) {
+        btn.classList.toggle("selected");
+        btn.textContent = btn.classList.contains("selected") ? "Selected" : "Select";
+      }
+
+      function clearSelected() {
+        document.querySelectorAll(".block-pick.selected").forEach(btn => {
+          btn.classList.remove("selected");
+          btn.textContent = "Select";
+        });
+      }
+
+      function getSelectedTitles() {
+        return Array.from(document.querySelectorAll(".block-pick.selected"))
+          .map(btn => btn.dataset.title)
+          .filter(Boolean);
+      }
+
+      function addSelectedBlocks() {
+        const titles = getSelectedTitles();
+        if (titles.length === 0) {
+          alert("No blocks selected.");
+          return;
+        }
+
+        if (titles.length === 1) {
+          planObj.plan.push({ include: titles[0] });
+        } else {
+          // default choose policy: pick 1 of N (you can tweak later)
+          planObj.plan.push({ choose: { from: titles, min: 1, max: 1 } });
+        }
+
+        clearSelected();
+        sync();
+      }
+
+      function clearPlan() {
+        planObj = { plan: [] };
+        sync();
+      }
+
+      (function init() {
+        const txt = document.getElementById("plan_json").value.trim();
+        if (txt) {
+          try { planObj = JSON.parse(txt); }
+          catch { planObj = { plan: [] }; writePlanToTextarea(); }
+        } else {
+          writePlanToTextarea();
+        }
+        renderPlanList();
+
+        document.getElementById("plan_json").addEventListener("blur", () => {
+          try {
+            planObj = readPlanFromTextarea();
+            if (!planObj.plan) planObj.plan = [];
+            renderPlanList();
+          } catch (e) {}
+        });
+      })();
+    </script>
+  </body>
+</html>

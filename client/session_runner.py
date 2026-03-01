@@ -3,6 +3,62 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from PySide6.QtCore import QObject, QTimer
+import re
+import random
+from ui_settings import get_pet_names
+
+_PNS_PATTERN = re.compile(r"#PNS", re.IGNORECASE)
+
+def _apply_pns(text: str) -> str:
+    names = get_pet_names() or []
+    if not text or not names:
+        return text
+
+    matches = list(_PNS_PATTERN.finditer(text))
+    n = len(matches)
+    if n == 0:
+        return text
+
+    # Best-effort uniqueness per message:
+    # - If we have enough unique names, use sampling without replacement for all occurrences.
+    # - If not, use each name once (shuffled), then allow repeats for remaining occurrences.
+    if len(names) >= n:
+        picks = random.sample(names, k=n)
+    else:
+        picks = random.sample(names, k=len(names))
+        last = picks[-1] if picks else None
+        for _ in range(n - len(picks)):
+            # try to avoid immediate repeats when we’re forced to repeat
+            if len(names) > 1:
+                for __ in range(5):
+                    c = random.choice(names)
+                    if c != last:
+                        break
+                else:
+                    c = random.choice(names)
+            else:
+                c = names[0]
+            picks.append(c)
+            last = c
+
+    it = iter(picks)
+    return _PNS_PATTERN.sub(lambda _m: next(it), text)
+
+def _apply_pns_to_step(step: dict) -> dict:
+    step = dict(step)  # shallow copy
+
+    for key in ("title", "body", "text", "url"):
+        if isinstance(step.get(key), str):
+            step[key] = _apply_pns(step[key])
+
+    if isinstance(step.get("messages"), list):
+        step["messages"] = [
+            _apply_pns(m) if isinstance(m, str) else m
+            for m in step["messages"]
+        ]
+
+    return step
+
 
 DispatchFn = Callable[[dict], None]
 
@@ -35,6 +91,18 @@ class SessionRunner(QObject):
         self._paused = False
         # continue immediately
         self._timer.start(0)
+        
+    def is_paused(self) -> bool:
+        return bool(self._paused)
+
+    def toggle_pause(self) -> None:
+        if not self._active:
+            return
+        if self._paused:
+            self.resume()
+        else:
+            self.pause()
+
 
     def is_active(self) -> bool:
         return self._active
@@ -72,6 +140,8 @@ class SessionRunner(QObject):
 
         step = dict(self._steps[self._i])  # shallow copy
         self._i += 1
+        if isinstance(step, dict):
+            step = _apply_pns_to_step(step)
         # Timer is session pacing only (Option A)
         timer_s = step.get("timer_s")
         if timer_s is None:

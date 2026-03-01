@@ -1,7 +1,7 @@
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import QApplication, QDialog, QLabel
 from PySide6.QtGui import QPixmap, QScreen, QIcon
-from ui_settings import get_popup_screens
+from ui_settings import get_popup_screens, get_image_save_enabled, get_image_save_dir
 import sys
 import os
 from PIL import Image
@@ -9,8 +9,9 @@ from PIL import ImageQt
 import requests
 import random
 from io import BytesIO
-
 from pathlib import Path
+import hashlib
+import time
 
 def resource_path(relative: str) -> str:
     if hasattr(sys, "_MEIPASS"):
@@ -97,6 +98,36 @@ class ImagePopup(QDialog):
             return
         self.max = 800  # max image size
         if self.imdata.status_code == 200:  # if the image was got successfully
+            if get_image_save_enabled():
+                save_dir = get_image_save_dir()
+                if save_dir:
+                    try:
+                        out_dir = Path(save_dir)
+                        out_dir.mkdir(parents=True, exist_ok=True)
+
+                        # Build a safe filename. Use URL basename if present, else a hash.
+                        base = os.path.basename(imageURL.split("?")[0]).strip()
+                        if not base or "." not in base:
+                            h = hashlib.sha1(imageURL.encode("utf-8")).hexdigest()[:10]
+                            base = f"image_{int(time.time())}_{h}.jpg"
+                        
+                        out_path = out_dir / base
+                        
+                        # Avoid overwrite: add suffix if exists
+                        if out_path.exists():
+                            stem = out_path.stem
+                            suf = out_path.suffix or ".jpg"
+                            for i in range(1, 1000):
+                                cand = out_dir / f"{stem}_{i}{suf}"
+                                if not cand.exists():
+                                    out_path = cand
+                                    break
+
+                        out_path.write_bytes(self.imdata.content)
+                    except Exception:
+                        # Don't break popups if saving fails
+                        pass
+                 
             self.imaged = Image.open(BytesIO(self.imdata.content))
             try:
                 alpha = self.imaged.getchannel('A')  # get the alpha channel

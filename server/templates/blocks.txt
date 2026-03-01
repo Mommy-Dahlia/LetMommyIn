@@ -1,0 +1,124 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Blocks</title>
+    <script src="https://unpkg.com/htmx.org@1.9.12"></script>
+    <link rel="stylesheet" href="/static/admin.css">
+  </head>
+  <body>
+    <p><a href="/">← Back</a></p>
+    <h1>Blocks</h1>
+
+    <h2>Add / Edit a Block</h2>
+    <form
+      hx-post="/admin/blocks/save"
+      hx-target="#result"
+      hx-swap="innerHTML"
+    >
+      <p>
+        <label>Title<br/>
+          <input name="title" required style="width: 50%;" placeholder="Induct Base" />
+        </label>
+      </p>
+
+      <p>
+        <label>Summary<br/>
+          <input name="summary" style="width: 80%;" placeholder="1–2 sentences" />
+        </label>
+      </p>
+
+      <p>
+        <label>Tags (comma-separated)<br/>
+          <input name="tags" style="width: 80%;" placeholder="induction, pacing" />
+        </label>
+      </p>
+
+      <p>
+        <label>Intensity (blank or integer)<br/>
+          <input name="intensity" style="width: 10rem;" placeholder="3" />
+        </label>
+      </p>
+
+      <p>
+        <label>Body (.txt contents)<br/>
+          <textarea name="body" rows="14" style="width: 95%;" required></textarea>
+        </label>
+      </p>
+
+      <p>
+        <label>
+          <input type="checkbox" name="overwrite" value="1" />
+          Overwrite if title already exists
+        </label>
+      </p>
+
+      <button type="submit">Save Block</button>
+    </form>
+
+    <hr/>
+
+    <h2>Bulk Upload (Option A)</h2>
+    <form
+      hx-post="/admin/blocks/bulk_upload"
+      hx-target="#result"
+      hx-swap="innerHTML"
+      enctype="multipart/form-data"
+    >
+      <p>
+        <label>blocks.csv<br/>
+          <input name="csv_file" type="file" accept=".csv,text/csv" required />
+        </label>
+      </p>
+
+      <p>
+        <label>Block .txt files (select multiple)<br/>
+          <input name="txt_files" type="file" accept=".txt,text/plain" multiple required />
+        </label>
+      </p>
+
+      <p>
+        <label>
+          <input type="checkbox" name="overwrite" value="1" />
+          Overwrite duplicates (confirm)
+        </label>
+      </p>
+
+      <button type="submit">Bulk Upload</button>
+    </form>
+
+    <hr/>
+
+    <h2>Loaded Blocks</h2>
+    <div style="display:flex; gap: 1rem;">
+      <div style="flex: 1;">
+        <ul>
+          {% for b in blocks %}
+            <li style="margin-bottom: 6px;">
+              <button
+                type="button"
+                hx-get="/admin/blocks/preview?title={{ b.title | urlencode }}"
+                hx-target="#block-preview"
+                hx-swap="innerHTML"
+              >
+                Preview
+              </button>
+              <b>{{ b.title }}</b>
+              {% if b.intensity is not none %}<span> (I={{ b.intensity }})</span>{% endif %}
+              <div style="color:#666; font-size:0.9em;">{{ b.summary }}</div>
+            </li>
+          {% endfor %}
+        </ul>
+      </div>
+
+      <div style="flex: 1;">
+        <h3>Preview</h3>
+        <pre id="block-preview" style="white-space: pre-wrap; border:1px solid #ddd; padding:8px; min-height: 200px;"></pre>
+      </div>
+    </div>
+    <hr/>
+    <h2>Result</h2>
+    <pre id="result" style="white-space: pre-wrap;"></pre>
+
+  </body>
+</html>

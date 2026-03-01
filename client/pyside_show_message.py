@@ -34,24 +34,6 @@ class MessagePopup(QDialog):
         )
         self.setWindowFlag(Qt.WindowCloseButtonHint, False)
         self.setWindowFlag(Qt.WindowSystemMenuHint, False)
-        self.setStyleSheet("""
-            QDialog {
-                background-color: #e8d9f1;
-            }
-            QLabel {
-                color: #4b006e;
-            }
-            QPushButton {
-                background-color: #dcc6ea;
-                color: #4b006e;
-                border: 1px solid #4b006e;
-                padding: 6px 10px;
-                border-radius: 8px;
-            }
-            QPushButton:hover {
-                background-color: #e8d9f1;
-            }
-        """)
 
         font1 = QFont()
         font1.setPointSize(12)

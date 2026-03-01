@@ -23,14 +23,6 @@ class WriteForMommy(QDialog):
         self.setWindowFlags(Qt.WindowStaysOnTopHint | Qt.Window)
         self.setWindowFlag(Qt.WindowCloseButtonHint, False)
         self.setWindowFlag(Qt.WindowSystemMenuHint, False)
-        self.setStyleSheet("""
-            QDialog {
-                background-color: #e8d9f1;
-            }
-            QLabel {
-                color: #4b006e;
-            }
-        """)
         self.completedrepetitions = 0
         self.targetreps = targetreps or 3
         self._debounce_timer = QTimer(self)
@@ -86,19 +78,6 @@ class WriteForMommy(QDialog):
         self.e1.setLayoutDirection(Qt.LayoutDirection.LeftToRight)
         self.e1.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.e1.textEdited.connect(self._on_text_edited)
-        self.e1.setStyleSheet("""
-            QLineEdit {
-                background-color: #ffffff;
-                color: #4b006e;
-                border: 2px solid #dcc6ea;
-                padding: 6px;
-                font-size: 14px;
-                border-radius: 8px;
-            }
-            QLineEdit:focus {
-                border: 2px solid #4b006e;
-            }
-        """)
         self.guidetext = QLabel(
             self, text="Enter the text Exactly as shown, cutie~")
         self.guidetext.setLayoutDirection(Qt.LayoutDirection.LeftToRight)
