@@ -516,6 +516,54 @@ def compile_plan_to_script_lines(plan_obj: dict) -> tuple[list[str], list[str]]:
 
     return out_lines, chosen_blocks
 
+def extract_referenced_blocks_from_plan(plan_obj: dict) -> list[str]:
+    """
+    Returns a deduped, stable list of block titles referenced by include + choose.from.
+    We intentionally include *all* choose candidates so the client can compile locally later.
+    """
+    items = (plan_obj or {}).get("plan")
+    if not isinstance(items, list):
+        return []
+
+    referenced: set[str] = set()
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+
+        if "include" in item:
+            referenced.add(str(item["include"]).strip())
+
+        elif "choose" in item and isinstance(item["choose"], dict):
+            frm = item["choose"].get("from")
+            if isinstance(frm, list):
+                for x in frm:
+                    referenced.add(str(x).strip())
+
+    # remove empties and return sorted for deterministic order
+    return sorted([t for t in referenced if t])
+
+async def push_or_queue_session_with_blocks(device_id: str, session_title: str) -> None:
+    # 1) Load session plan_json directly (same query build_inject_session_payload uses)
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            "SELECT plan_json FROM sessions WHERE title = ?",
+            (session_title,),
+        ).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail=f"Unknown session: {session_title}")
+
+    plan_obj = _json_loads(row[0]) or {}
+    block_titles = extract_referenced_blocks_from_plan(plan_obj)
+
+    # 2) Inject all blocks first
+    for bt in block_titles:
+        payload_block = build_inject_block_payload(bt)
+        await push_or_queue_injection(device_id=device_id, payload=payload_block)
+
+    # 3) Then inject the session itself
+    payload_session = build_inject_session_payload(session_title)
+    await push_or_queue_injection(device_id=device_id, payload=payload_session)
+    
 SESSION_TAG_EXCLUDE = {"induction", "deepener", "training", "dream", "ending"}
 
 def compute_session_meta_from_plan(plan: dict) -> tuple[list[str], int | None]:
@@ -1878,10 +1926,8 @@ async def inject_block_to_device(device_id: str, block_title: str = Form(...)):
 
 @app.post("/device/{device_id}/inject/session")
 async def inject_session_to_device(device_id: str, session_title: str = Form(...)):
-    payload = build_inject_session_payload(session_title.strip())
-
-    await push_or_queue_injection(device_id=device_id, payload=payload)
-    return PlainTextResponse("OK inject_session → device")
+    await push_or_queue_session_with_blocks(device_id, session_title.strip())
+    return PlainTextResponse("OK inject_session (+blocks) → device")
 
 @app.post("/inject/block")
 async def inject_block_broadcast(
@@ -1915,7 +1961,7 @@ async def inject_session_broadcast(
         record_broadcast_event(target.strip().lower(), payload)
 
     for did in targets:
-        await push_or_queue_injection(device_id=did, payload=payload)
+        await push_or_queue_session_with_blocks(device_id=did, payload=payload)
 
     return PlainTextResponse(f"OK inject_session -> {len(targets)} target(s)")
 
