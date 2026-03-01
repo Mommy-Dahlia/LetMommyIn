@@ -631,6 +631,22 @@ def queue_delivery(device_id: str, payload: dict) -> None:
         )
         conn.commit()
         
+async def send_payload_expanding_sessions(ws: WebSocket, payload: dict) -> None:
+    """
+    If payload is an inject_session, emit inject_block payloads first (same ws),
+    then emit the session payload.
+    """
+    if payload.get("type") == "inject_session":
+        title = str(payload.get("title") or "").strip()
+        plan_obj = payload.get("session_json") or {}
+        if title:
+            for bt in extract_referenced_blocks_from_plan(plan_obj):
+                await ws.send_json(build_inject_block_payload(bt))
+        await ws.send_json(payload)
+        return
+
+    await ws.send_json(payload)
+    
 async def drain_pending_deliveries(device_id: str, ws: WebSocket) -> None:
     with sqlite3.connect(DB_PATH) as conn:
         rows = conn.execute(
@@ -640,7 +656,7 @@ async def drain_pending_deliveries(device_id: str, ws: WebSocket) -> None:
 
     for delivery_id, payload_json in rows:
         payload = _json_loads(payload_json) or {}
-        await ws.send_json(payload)  # use your existing send method if different
+        await send_payload_expanding_sessions(ws, payload)
 
         with sqlite3.connect(DB_PATH) as conn:
             conn.execute(
@@ -660,7 +676,7 @@ async def replay_broadcast_history(device_id: str, ws: WebSocket) -> None:
     all_events = load_broadcast_events_since(audience="all", after_id=last_all)
     max_all = last_all
     for eid, payload in all_events:
-        await ws.send_json(payload)
+        await send_payload_expanding_sessions(ws, payload)
         max_all = eid
 
     # Replay "paid" only if device is currently paid
@@ -669,7 +685,7 @@ async def replay_broadcast_history(device_id: str, ws: WebSocket) -> None:
     if tier == "paid":
         paid_events = load_broadcast_events_since(audience="paid", after_id=last_paid)
         for eid, payload in paid_events:
-            await ws.send_json(payload)
+            await send_payload_expanding_sessions(ws, payload)
             max_paid = eid
 
     # Advance cursors only after successful sends

@@ -40,6 +40,9 @@ from session_compiler import SessionCompiler
 from session_customizer import SessionCustomizerDialog
 from session_launcher import SessionLauncherDialog
 from ui_theme import apply_app_theme
+from pyside_injection_summary import InjectionBatchNotifier, InjectEvent
+
+_injection_notifier = InjectionBatchNotifier(quiet_ms=800)
 
 def get_content_roots(config_dir: Path) -> list[Path]:
     """
@@ -602,6 +605,7 @@ def main() -> None:
 
     def _handle_injection(cmd: dict) -> None:
         t = cmd.get("type")
+
         if t == "inject_block":
             stem = write_injected_block(
                 local_root,
@@ -611,7 +615,7 @@ def main() -> None:
                 intensity=cmd.get("intensity", None),
                 body=str(cmd.get("body") or ""),
             )
-            QMessageBox.information(None, "Block received", f"Saved block:\n{stem}")
+            _injection_notifier.add(InjectEvent(kind="block", title=stem))
             return
 
         if t == "inject_session":
@@ -623,7 +627,7 @@ def main() -> None:
                 intensity=cmd.get("intensity", None),
                 session_json=dict(cmd.get("session_json") or {}),
             )
-            QMessageBox.information(None, "Session received", f"Saved session:\n{stem}")
+            _injection_notifier.add(InjectEvent(kind="session", title=stem))
             return
 
     set_injection_handler(_handle_injection)

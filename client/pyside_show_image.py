@@ -57,7 +57,9 @@ class ImagePopup(QDialog):
         self.setWindowTitle("Image Popup")
         self.setWindowFlags(Qt.FramelessWindowHint |
                             Qt.WindowStaysOnTopHint | Qt.Window)
-        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setAttribute(Qt.WA_TranslucentBackground, False)
+
+        self.setStyleSheet("background: #e8d9f1;")
         if os.path.exists(ICON_PATH):
             self.setWindowIcon(QIcon(ICON_PATH))
         self.label = QLabel(self)
@@ -139,7 +141,6 @@ class ImagePopup(QDialog):
             self.cropim.thumbnail((self.max, self.max),
                                   Image.Resampling.LANCZOS)
             self.pixmap = ImageQt.toqpixmap(self.cropim)
-        self.label.setPixmap(self.pixmap)
 
 
 def show_image(url: str) -> None:
