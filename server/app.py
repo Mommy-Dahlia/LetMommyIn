@@ -444,7 +444,8 @@ def compile_plan_to_steps(plan: dict) -> tuple[list[dict], list[str]]:
 
         raise ValueError(f"unknown plan item keys: {list(item.keys())}")
 
-    # ---- compile into timed steps (mirrors local pipeline) ----
+    images = TheFactory.load_images("images.csv")
+    out_lines = TheFactory.assign_images(out_lines, images)
     lines, delays = TheFactory.extract_delays(out_lines)
     steps = TheFactory.wrap_output(lines, delays)
     TheFactory.ensure_timer_s_everywhere(steps)
