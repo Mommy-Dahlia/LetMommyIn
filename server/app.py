@@ -461,6 +461,8 @@ def compile_script_to_steps(script_text: str) -> list[dict]:
     text = normalize_newlines(script_text or "")
     lines = text.splitlines()
 
+    images = TheFactory.load_images("images.csv")
+    lines = TheFactory.assign_images(lines, images)
     lines, delays = TheFactory.extract_delays(lines)
     steps = TheFactory.wrap_output(lines, delays)
     TheFactory.ensure_timer_s_everywhere(steps)
