@@ -861,6 +861,15 @@ def admin_create_enroll_code(ttl_minutes: int = 15):
     code, expires_at = create_enroll_code(ttl_seconds=ttl_seconds)
     return {"code": code, "expires_at": expires_at}
 
+@app.post("/discord/enroll")
+def enroll_discord(
+    payload: dict = Body(default={})
+):
+    # Caddy basic_auth gates this route; no FastAPI auth needed.
+    # Optional: validate payload shape if you want, but not required for code generation.
+    code, expires_at = create_enroll_code(ttl_seconds=15 * 60)
+    return {"code": code, "expires_at": expires_at}
+
 @admin_router.get("/devices")
 def admin_list_devices():
     with sqlite3.connect(DB_PATH) as conn:
