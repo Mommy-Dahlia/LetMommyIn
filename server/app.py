@@ -20,7 +20,7 @@ import secrets
 import TheFactory
 
 from fastapi import FastAPI, APIRouter, Request, WebSocket, WebSocketDisconnect, HTTPException, Form, UploadFile, File, Body
-from fastapi.responses import HTMLResponse, PlainTextResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from datetime import datetime
@@ -868,7 +868,7 @@ def enroll_discord(
     # Caddy basic_auth gates this route; no FastAPI auth needed.
     # Optional: validate payload shape if you want, but not required for code generation.
     code, expires_at = create_enroll_code(ttl_seconds=15 * 60)
-    return {"code": code, "expires_at": expires_at}
+    return JSONResponse({"code": code, "expires_at": expires_at})
 
 @admin_router.get("/devices")
 def admin_list_devices():
