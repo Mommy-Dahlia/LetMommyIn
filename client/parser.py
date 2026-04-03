@@ -116,7 +116,6 @@ def _apply_client_session_defaults(steps: list[dict]) -> list[dict]:
         for s in out:
             if isinstance(s, dict) and s.get("type") == "audio_play":
                 saw_audio_play = True
-                s["url"] = default_audio  # override session-provided url
 
         if not saw_audio_play:
             out.insert(0, {
@@ -125,6 +124,7 @@ def _apply_client_session_defaults(steps: list[dict]) -> list[dict]:
                 "volume": 0.8,
                 "loop": True,
                 "timer_s": 0,
+                "_is_default": True,  # marker
             })
 
         has_audio_stop = any(s.get("type") == "audio_stop" for s in out if isinstance(s, dict))

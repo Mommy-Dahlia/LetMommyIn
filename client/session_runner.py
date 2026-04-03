@@ -6,8 +6,19 @@ from PySide6.QtCore import QObject, QTimer
 import re
 import random
 from ui_settings import get_pet_names
+from TheFactory import DEFAULT_PACING_S
+import time
 
 _PNS_PATTERN = re.compile(r"#PNS", re.IGNORECASE)
+
+DEFAULT_SESSION_TIMER_MS = int(DEFAULT_PACING_S * 1000)
+
+def _estimate_duration_s(steps: list[dict]) -> float:
+    return sum(
+        max(0.0, float(s.get("timer_s", DEFAULT_SESSION_TIMER_MS / 1000)))
+        for s in steps
+        if isinstance(s, dict)
+    )
 
 def _apply_pns(text: str) -> str:
     names = get_pet_names() or []
@@ -61,8 +72,6 @@ def _apply_pns_to_step(step: dict) -> dict:
 
 
 DispatchFn = Callable[[dict], None]
-
-DEFAULT_SESSION_TIMER_MS = 8000
 
 class SessionRunner(QObject):
     """
@@ -123,6 +132,14 @@ class SessionRunner(QObject):
         self._session_id = session_id
         self._steps = steps
         self._i = 0
+        
+        estimated_s = _estimate_duration_s(steps)
+        self._dispatch({
+            "type": "__session_started__",
+            "session_id": session_id,
+            "estimated_s": estimated_s,
+            "started_at": time.time(),
+        })
 
         self._run_next_step()
 

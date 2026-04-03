@@ -18,6 +18,7 @@ import sqlite3
 import hashlib
 import secrets
 import TheFactory
+import logging
 
 from fastapi import FastAPI, APIRouter, Request, WebSocket, WebSocketDisconnect, HTTPException, Form, UploadFile, File, Body
 from fastapi.responses import HTMLResponse, PlainTextResponse, JSONResponse
@@ -445,8 +446,8 @@ def compile_plan_to_steps(plan: dict) -> tuple[list[dict], list[str]]:
         raise ValueError(f"unknown plan item keys: {list(item.keys())}")
 
     images = TheFactory.load_images("images.csv")
-    out_lines = TheFactory.assign_images(out_lines, images)
     lines, delays = TheFactory.extract_delays(out_lines)
+    lines = TheFactory.assign_images(lines, images)
     steps = TheFactory.wrap_output(lines, delays)
     TheFactory.ensure_timer_s_everywhere(steps)
     steps = TheFactory.apply_effect_scoping(steps)
@@ -462,8 +463,8 @@ def compile_script_to_steps(script_text: str) -> list[dict]:
     lines = text.splitlines()
 
     images = TheFactory.load_images("images.csv")
-    lines = TheFactory.assign_images(lines, images)
     lines, delays = TheFactory.extract_delays(lines)
+    lines = TheFactory.assign_images(lines, images)
     steps = TheFactory.wrap_output(lines, delays)
     TheFactory.ensure_timer_s_everywhere(steps)
     steps = TheFactory.apply_effect_scoping(steps)
@@ -1207,6 +1208,25 @@ class LogEvent:
     event: str           # e.g., "connect", "disconnect", "sent", "ack"
     detail: str = ""
     command_id: str = "-"
+    
+@dataclass
+class ActiveSession:
+    session_id: str
+    device_id: str
+    started_at: float
+    estimated_s: float
+
+    def progress(self) -> float:
+        elapsed = time.time() - self.started_at
+        if self.estimated_s <= 0:
+            return 1.0
+        return min(1.0, elapsed / self.estimated_s)
+
+    def elapsed_s(self) -> float:
+        return time.time() - self.started_at
+
+    def remaining_s(self) -> float:
+        return max(0.0, self.estimated_s - self.elapsed_s())
 
 class Hub:
     def __init__(self):
@@ -1218,6 +1238,8 @@ class Hub:
 
         # simple event log (in memory for PoC)
         self.logs: list[LogEvent] = []
+        
+        self.active_sessions: dict[str, ActiveSession] = {}
         
         self.last_command_ts: float | None = None
 
@@ -1238,7 +1260,7 @@ class Hub:
 
     def unregister(self, device_id: str):
         self.connections.pop(device_id, None)
-
+        self.clear_session(device_id)
         dev = self.devices.get(device_id)
         if dev:
             self.logs.append(
@@ -1271,6 +1293,17 @@ class Hub:
         )
         if len(self.logs) > MAX_LOG_EVENTS:
             self.logs.pop(0)
+            
+    def record_session_start(self, device_id: str, session_id: str, estimated_s: float, started_at: float) -> None:
+        self.active_sessions[device_id] = ActiveSession(
+            session_id=session_id,
+            device_id=device_id,
+            started_at=started_at,
+            estimated_s=estimated_s,
+        )
+
+    def clear_session(self, device_id: str) -> None:
+        self.active_sessions.pop(device_id, None)
 
     def handle_ack(self, device_id: str, msg: dict):
         # Expect: {type:"ack", id:"cmd_x", status:"shown", detail:""}
@@ -1325,6 +1358,7 @@ def get_devices():
 @app.get("/device/{device_id}", response_class=HTMLResponse)
 def device_page(request: Request, device_id: str):
     d = hub.devices.get(device_id)
+    sess = hub.active_sessions.get(d.device_id)
     if not d:
         raise HTTPException(status_code=404, detail="Unknown device")
     last_seen_ts = as_ts(d.last_seen)
@@ -1338,6 +1372,8 @@ def device_page(request: Request, device_id: str):
         "last_seen": fmt_unix_et(last_seen_ts),
         "online": d.device_id in hub.connections,
         "tier": get_device_tier(d.device_id),
+        "session_progress": round(sess.progress() * 100) if sess else None,
+        "session_remaining_s": round(sess.remaining_s()) if sess else None,
     }
 
     logs = [l for l in hub.logs if l.device_id == device_id][-50:]
@@ -1352,7 +1388,7 @@ def index(request: Request):
     devices = []
     for d in hub.devices.values():
         last_seen_ts = as_ts(d.last_seen)
-
+        sess = hub.active_sessions.get(d.device_id)
         devices.append({
             "device_id": d.device_id,
             "username": d.username,
@@ -1362,6 +1398,8 @@ def index(request: Request):
             "last_seen_ts": last_seen_ts,            # NEW
             "last_seen": fmt_unix_et(last_seen_ts),  # display string
             "online": d.device_id in hub.connections,
+            "session_progress": round(sess.progress() * 100) if sess else None,
+            "session_remaining_s": round(sess.remaining_s()) if sess else None,
         })
 
     devices.sort(key=lambda x: (not x["online"], -x["last_seen_ts"]))
@@ -1472,6 +1510,20 @@ def sessions_save(
         return PlainTextResponse(f"Save failed: {e}", status_code=400)
 
     return PlainTextResponse(f"Saved session: {title}")
+
+@app.get("/device/{device_id}/session_progress", response_class=HTMLResponse)
+def session_progress_fragment(device_id: str):
+    sess = hub.active_sessions.get(device_id)
+    if sess is None:
+        return HTMLResponse("")  # empty = nothing to show
+    progress = round(sess.progress() * 100)
+    remaining = round(sess.remaining_s())
+    return HTMLResponse(f"""
+        <b>Session in progress</b> — ~{remaining}s remaining
+        <div style="width:100%; max-width:400px; background:#ddd; border-radius:4px; overflow:hidden; margin-top:6px;">
+            <div style="width:{progress}%; background:#4b006e; height:16px; transition: width 2s linear;"></div>
+        </div>
+    """)
 
 @app.post("/device/{device_id}/tier")
 async def set_tier_from_device_page(
@@ -1989,7 +2041,7 @@ async def inject_session_broadcast(
         record_broadcast_event(target.strip().lower(), payload)
 
     for did in targets:
-        await push_or_queue_session_with_blocks(device_id=did, payload=payload)
+        await push_or_queue_session_with_blocks(did, session_title.strip())
 
     return PlainTextResponse(f"OK inject_session -> {len(targets)} target(s)")
 
@@ -2002,7 +2054,7 @@ async def ws_endpoint(ws: WebSocket):
 
 
     if (device_token is None) == (enroll_code is None):
-        # either both provided or neither provided
+        logging.warning("WS auth rejected: must supply exactly one of device_token or enroll_code")
         await ws.close(code=1008)
         return
     
@@ -2010,11 +2062,13 @@ async def ws_endpoint(ws: WebSocket):
     if device_token:
         expected_device_id = get_device_id_for_token(device_token)
         if not expected_device_id:
+            logging.warning("WS auth rejected: unknown device_token")
             await ws.close(code=1008)
             return
 
     if enroll_code:
         if not consume_enroll_code(enroll_code):
+            logging.warning("WS auth rejected: invalid or expired enroll_code")
             await ws.close(code=1008)
             return
 
@@ -2031,11 +2085,11 @@ async def ws_endpoint(ws: WebSocket):
             return
 
         # 2) Extract and validate identity fields
-        device_id = str(msg.get("device_id", "")).strip()
-        username = str(msg.get("username", "")).strip()
-        device_name = str(msg.get("device_name", "")).strip()
-        version = str(msg.get("version", "v0.0")).strip()
-        protocol = str(msg.get("protocol","v0.0")).strip()
+        device_id = str(msg.get("device_id", "")).strip()[:64]
+        username = str(msg.get("username", "")).strip()[:64]
+        device_name = str(msg.get("device_name", "")).strip()[:64]
+        version = str(msg.get("version", "v0.0")).strip()[:16]
+        protocol = str(msg.get("protocol","v0.0")).strip()[:8]
         
         if protocol != PROTOCOL_VERSION:
             await ws.close(code=1008)
@@ -2117,6 +2171,11 @@ async def ws_endpoint(ws: WebSocket):
                 update_device_metadata(device_id, None, None)
             elif mtype == "ack":
                 hub.handle_ack(device_id, msg)
+            elif mtype == "session_started":
+                estimated_s = float(msg.get("estimated_s") or 0)
+                started_at = float(msg.get("started_at") or time.time())
+                session_id = str(msg.get("session_id") or "")
+                hub.record_session_start(device_id, session_id, estimated_s, started_at)
             else:
                 hub.log(device_id, "client_message", detail=f"unknown type: {mtype}")
                 await ws.close(code=1003)

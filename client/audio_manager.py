@@ -35,16 +35,17 @@ class AudioManager(QObject):
         self.stop()
 
         self._audio.setVolume(max(0.0, min(1.0, float(volume))))
-
+        self._loop = loop
         self._player.setSource(QUrl(url))
 
-        if loop:
-            # Qt6: QMediaPlayer has setLoops in recent versions.
-            # If this attribute doesn't exist in your PySide6 build, we’ll add a fallback.
-            if hasattr(self._player, "setLoops"):
-                self._player.setLoops(QMediaPlayer.Infinite)
-        self._player.play()
+        def _on_status(status):
+            if status == QMediaPlayer.LoadedMedia:
+                if loop and hasattr(self._player, "setLoops"):
+                    self._player.setLoops(QMediaPlayer.Infinite)
+                self._player.play()
+                self._player.mediaStatusChanged.disconnect(_on_status)
 
+        self._player.mediaStatusChanged.connect(_on_status)
         self.state.url = url
         self.state.is_playing = True
 

@@ -20,6 +20,12 @@
       <li><b>Tier:</b> {{ device.tier }}</li>
     </ul>
 
+    <div id="session-progress-header"
+      hx-get="/device/{{ device.device_id }}/session_progress"
+      hx-trigger="load, every 5s"
+      hx-swap="innerHTML">
+    </div>
+
     <h2>Tier</h2>
 
     <form

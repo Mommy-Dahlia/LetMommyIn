@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 import requests
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QMovie
 from PySide6.QtWidgets import QApplication, QDialog, QLabel
 import sys
@@ -107,27 +107,28 @@ class GifOverlay(QDialog):
         self.setWindowOpacity(max(0.0, min(1.0, float(opacity))))
 
         self._movie = QMovie(self._gif_path)
-
-# Every time a new frame is ready, redraw it stretched to the window
-        self._movie.frameChanged.connect(lambda _i: self._render_scaled_frame())
-
+        self._movie.setCacheMode(QMovie.CacheAll)  # pre-cache all frames
         self._movie.start()
+        self._movie.setPaused(True)  # we'll drive it manually
+
+        self._frame_timer = QTimer(self)
+        self._frame_timer.setTimerType(Qt.PreciseTimer)  # higher resolution
+        self._frame_timer.timeout.connect(self._advance_frame)
+        self._frame_timer.start(33)  # ~30fps
 
 # Render first frame immediately
-        self._render_scaled_frame()
-
-        self._movie.start()
+        self._advance_frame()
         
-    def _render_scaled_frame(self) -> None:
+    def _advance_frame(self) -> None:
         if self._movie is None:
             return
+        self._movie.jumpToNextFrame()
         pix = self._movie.currentPixmap()
         if pix.isNull():
             return
-
         scaled = pix.scaled(
             self._label.size(),
-            Qt.IgnoreAspectRatio,          # <- stretch to fill
+            Qt.IgnoreAspectRatio,
             Qt.SmoothTransformation,
         )
         self._label.setPixmap(scaled)
@@ -135,6 +136,8 @@ class GifOverlay(QDialog):
 
     def closeEvent(self, event):
         try:
+            if self._frame_timer is not None:
+                self._frame_timer.stop()
             if self._movie is not None:
                 self._movie.stop()
         finally:

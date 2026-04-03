@@ -74,6 +74,7 @@
           <th>Send Saved Session</th>
           <th>Inject Block</th>
           <th>Inject Session</th>
+	  <th>Session</th>
         </tr>
       </thead>
       <tbody>
@@ -120,6 +121,13 @@
             <button type="submit">Inject</button>
           </form>
           <div id="send-result-{{ d.device_id }}" style="margin-top:6px; font-size: 0.9em;"></div>
+        </td>
+        <td>
+          <div id="sess-{{ d.device_id }}"
+            hx-get="/device/{{ d.device_id }}/session_progress"
+            hx-trigger="load, every 5s"
+            hx-swap="innerHTML">
+          </div>
         </td>
         </tr>
         {% endfor %}

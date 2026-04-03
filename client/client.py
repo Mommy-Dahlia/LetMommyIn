@@ -44,6 +44,20 @@ from pyside_injection_summary import InjectionBatchNotifier, InjectEvent
 
 _injection_notifier = InjectionBatchNotifier(quiet_ms=800)
 
+_CODE_PATTERN = re.compile(r'^[A-Za-z0-9_\-]{16,}$')
+
+def _looks_like_enroll_code(text: str) -> bool:
+    return bool(_CODE_PATTERN.match(text.strip()))
+
+async def _send_to_server(payload: dict) -> None:
+    global _NET_WS
+    ws = _NET_WS
+    if ws is not None:
+        try:
+            await ws.send(json.dumps(payload))
+        except Exception:
+            pass
+
 def get_content_roots(config_dir: Path) -> list[Path]:
     """
     Search order:
@@ -69,17 +83,24 @@ def safe_stem(name: str) -> str:
     return s or "untitled"
 
 _NET_LOOP: asyncio.AbstractEventLoop | None = None
-_NET_WS = None  # websockets client protocol
+_shutdown_event: asyncio.Event | None = None
 _NET_STOP = threading.Event()
 _HOTKEY_LISTENER = None
 
 def resource_path(relative: str) -> str:
-    # same convention you used in other modules
     if hasattr(sys, "_MEIPASS"):
         return str(Path(sys._MEIPASS) / relative)
     return str(Path(__file__).parent / relative)
 
-CONFIG_DIR = Path(os.getenv("APPDATA", ".")) / "LMI"
+def icon_path(stem: str) -> str:
+    """Returns platform-appropriate icon path."""
+    ext = ".ico" if sys.platform.startswith("win") else ".png"
+    return resource_path(f"{stem}{ext}")
+
+if sys.platform.startswith("win"):
+    CONFIG_DIR = Path(os.getenv("APPDATA", ".")) / "LMI"
+else:
+    CONFIG_DIR = Path.home() / ".config" / "LMI"
 CONFIG_PATH = CONFIG_DIR / "config.json"
 
 LOG_DIR = CONFIG_DIR / "logs"
@@ -172,6 +193,34 @@ class CommandDispatcher(QObject):
             if hasattr(self, "tray") and self.tray is not None:
                 self.tray.set_connected(bool(data.get("connected")))
             return
+        
+        if t == "__enroll_complete__":
+            QMessageBox.information(
+                None,
+                "Welcome~",
+                "You're all set up, darling~\n\n"
+                "Mommy's app is now running in your system tray — "
+                "look for the icon in the bottom right corner of your screen "
+                "(you may need to click the little arrow to see it)~\n\n"
+                "If you're not sure what to do next, check the FAQ on the server~",
+            )
+            return
+        
+        if t == "__session_started__":
+            loop = _NET_LOOP
+            ws = _NET_WS  # or use the shutdown event pattern
+            if loop is not None:
+                payload = {
+                    "type": "session_started",
+                    "session_id": data.get("session_id"),
+                    "estimated_s": data.get("estimated_s"),
+                    "started_at": data.get("started_at"),
+                }
+                asyncio.run_coroutine_threadsafe(
+                    _send_to_server(payload),
+                    loop
+                )
+            return
 
         cmd_id = data.get("id", "-")
         try:
@@ -232,11 +281,20 @@ async def ack_sender_loop(ws, ack_queue: "queue.Queue[dict]") -> None:
     """
     while True:
         # Block waiting for the next ack request, without blocking the asyncio loop
-        item = await asyncio.to_thread(ack_queue.get)
+        try:
+            item = await asyncio.to_thread(ack_queue.get, timeout=5)
+        except queue.Empty:
+            # No ack pending; check if we should still be running
+            continue
+        except asyncio.CancelledError:
+            return
         command_id = item.get("id", "-")
         status = item.get("status", "ack")
         detail = item.get("detail", "")
-        await send_ack(ws, command_id, status=status, detail=detail)
+        try:
+            await send_ack(ws, command_id, status=status, detail=detail)
+        except Exception:
+            return  # ws is gone; exit cleanly
 
 async def heartbeat_loop(ws, interval_s: int = 25) -> None:
     while True:
@@ -306,21 +364,33 @@ def write_injected_session(local_root: Path, *, title: str, summary: str, tags: 
     return stem
 
 def prompt_username() -> str:
-    username, ok = QInputDialog.getText(
-        None,
-        "Let Mommy In",
-        "Which one of Mommy's sweeties is downloading this~?",
-    )
-
-    if not ok or not username.strip():
-        QMessageBox.critical(
+    while True:
+        username, ok = QInputDialog.getText(
             None,
-            "Setup cancelled",
-            "I need to know who you are, darling~  Try again~",
+            "Let Mommy In",
+            "Which one of Mommy's sweeties is downloading this~?",
         )
-        raise SystemExit(1)
 
-    return username.strip()
+        if not ok or not username.strip():
+            QMessageBox.critical(
+                None,
+                "Setup cancelled",
+                "I need to know who you are, darling~  Try again~",
+            )
+            raise SystemExit(1)
+        
+        if _looks_like_enroll_code(username.strip()):
+            QMessageBox.warning(
+                None,
+                "Sweetheart...",
+                "That looks like Mommy's passcode, not your name~\n\n"
+                "Mommy asked for YOUR name, not the code~\n"
+                "I know you're eager, but reading is important silly~\n\n"
+                "Try again~",
+            )
+            continue
+
+        return username.strip()
 
 
 def first_run_setup() -> ClientConfig:
@@ -342,7 +412,7 @@ def first_run_setup() -> ClientConfig:
 
 # If you want default audio off by default, set None.
 # If you want it on, put a URL or file:// URL here.
-        default_audio_url="https://pub-6dd573008dee4009bea8855056470713.r2.dev/OMD/myNoise_BinauralBeats_63000063000000000000_0_5%20(1).mp3",
+        default_audio_url="https://pub-6dd573008dee4009bea8855056470713.r2.dev/OMD/better%20binaural.mp3",
 
 # Same for overlay.
         default_overlay_url="https://pub-6dd573008dee4009bea8855056470713.r2.dev/OMD/mommy1.gif",
@@ -394,8 +464,9 @@ def _network_thread_main(cfg: ClientConfig, bridge: CommandBridge, ack_queue: "q
     asyncio.run(run_client(cfg, bridge, ack_queue, initial_enroll_code))
 
 async def run_client(cfg, bridge: CommandBridge, ack_queue: "queue.Queue[dict]", initial_enroll_code: str | None):
-    global _NET_LOOP
+    global _NET_LOOP, _shutdown_event
     _NET_LOOP = asyncio.get_running_loop()
+    _shutdown_event = asyncio.Event()  # NEW
     
     delay = 2  # seconds
     max_delay = 30
@@ -428,8 +499,18 @@ async def run_client(cfg, bridge: CommandBridge, ack_queue: "queue.Queue[dict]",
 
                 # Receive loop (dispatch + ack)
                 try:
+                    recv_task = asyncio.create_task(ws.recv())
+                    shutdown_task = asyncio.create_task(_shutdown_event.wait())
+                    
                     while True:
-                        raw = await ws.recv()
+                        done, _ = await asyncio.wait(
+                            [recv_task, shutdown_task],
+                            return_when=asyncio.FIRST_COMPLETED
+                        )
+                        if shutdown_task in done:
+                            break
+                        raw = recv_task.result()
+                        recv_task = asyncio.create_task(ws.recv())
                         data = json.loads(raw)
                         
                         cmd_type = data.get("type")
@@ -457,6 +538,7 @@ async def run_client(cfg, bridge: CommandBridge, ack_queue: "queue.Queue[dict]",
 
                             # Clear pending enroll code so future connections use device_token
                             pending_enroll_code = None
+                            bridge.command_received.emit({"type": "__enroll_complete__"})
                             
                             # Break out to reconnect using the new token
                             break
@@ -480,16 +562,13 @@ async def run_client(cfg, bridge: CommandBridge, ack_queue: "queue.Queue[dict]",
                             await send_ack(ws, cmd_id, status=ACK_FAILED, detail=str(e))
                 finally:
                     _NET_WS = None
-                    hb_task.cancel()
-                    try:
-                        await hb_task
-                    except asyncio.CancelledError:
-                        pass
-                    ack_task.cancel()
-                    try:
-                        await ack_task
-                    except asyncio.CancelledError:
-                        pass
+                    for t in [recv_task, shutdown_task, hb_task, ack_task]:
+                        if t is not None:
+                            t.cancel()
+                            try:
+                                await t
+                            except (asyncio.CancelledError, Exception):
+                                pass
 
 
         except KeyboardInterrupt:
@@ -516,23 +595,11 @@ async def run_client(cfg, bridge: CommandBridge, ack_queue: "queue.Queue[dict]",
             delay = min(max_delay, delay * 2)
             
 def request_network_close() -> None:
-    """
-    Called from the Qt thread. Asks the asyncio loop to close the websocket.
-    """
-    global _NET_LOOP, _NET_WS
-
+    _NET_STOP.set()  # signals the while loop to not reconnect
     loop = _NET_LOOP
-    ws = _NET_WS
-    if loop is None or ws is None:
-        return
-
-    try:
-        fut = asyncio.run_coroutine_threadsafe(ws.close(code=1000, reason="client exit"), loop)
-        # don't block forever; just give it a moment
-        fut.result(timeout=1.0)
-    except Exception:
-        # ignore; we're exiting anyway
-        pass
+    ev = _shutdown_event
+    if loop is not None and ev is not None:
+        loop.call_soon_threadsafe(ev.set)
 
 def start_global_pause_hotkey(on_toggle) -> None:
     """
@@ -634,7 +701,9 @@ def main() -> None:
 
     cfg.pet_names = cfg.pet_names or ["pet", "toy", "darling", "sweetheart"]
     cfg.default_overlay_url = cfg.default_overlay_url or "https://pub-6dd573008dee4009bea8855056470713.r2.dev/OMD/mommy1.gif"
-    cfg.default_audio_url = cfg.default_audio_url or "https://pub-6dd573008dee4009bea8855056470713.r2.dev/OMD/myNoise_BinauralBeats_63000063000000000000_0_5%20(1).mp3"
+    cfg.default_audio_url = cfg.default_audio_url or "https://pub-6dd573008dee4009bea8855056470713.r2.dev/OMD/better%20binaural.mp3"
+    if cfg.default_audio_url == "https://pub-6dd573008dee4009bea8855056470713.r2.dev/OMD/myNoise_BinauralBeats_63000063000000000000_0_5%20(1).mp3":
+        cfg.default_audio_url = "https://pub-6dd573008dee4009bea8855056470713.r2.dev/OMD/better%20binaural.mp3"
     cfg.default_overlay_opacity = getattr(cfg, "default_overlay_opacity", 0.3)
     cfg.default_overlay_screen = getattr(cfg, "default_overlay_screen", -1)
     cfg.popup_sfx_path = cfg.popup_sfx_path or resource_path("popup.wav")
