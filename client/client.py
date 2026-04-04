@@ -128,6 +128,46 @@ class ClientConfig:
     image_save_dir: str | None = None
     tier: str = "free"
     session_receive_mode: str = "full"  # "full" | "minimal" | "off"
+    
+MANIFEST_PATH = CONFIG_DIR / "catalogue_manifest.json"
+
+def load_local_manifest() -> dict:
+    if not MANIFEST_PATH.exists():
+        return {"sessions": {}, "blocks": {}}
+    try:
+        with MANIFEST_PATH.open("r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {"sessions": {}, "blocks": {}}
+
+def save_local_manifest(manifest: dict) -> None:
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    with MANIFEST_PATH.open("w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=2)
+
+def update_manifest_entry(kind: str, title: str, updated_at: int) -> None:
+    manifest = load_local_manifest()
+    manifest[kind][title] = updated_at
+    save_local_manifest(manifest)
+    
+def compute_wanted(server_catalogue: dict) -> tuple[list[str], list[str]]:
+    manifest = load_local_manifest()
+    local_sessions = manifest.get("sessions", {})
+    local_blocks = manifest.get("blocks", {})
+
+    want_sessions = [
+        s["title"] for s in server_catalogue.get("sessions", [])
+        if s["title"] not in local_sessions
+        or local_sessions[s["title"]] < s["updated_at"]
+    ]
+
+    want_blocks = [
+        b["title"] for b in server_catalogue.get("blocks", [])
+        if b["title"] not in local_blocks
+        or local_blocks[b["title"]] < b["updated_at"]
+    ]
+
+    return want_sessions, want_blocks
 
 def load_config() -> ClientConfig | None:
     if not CONFIG_PATH.exists():
@@ -524,6 +564,15 @@ async def run_client(cfg, bridge: CommandBridge, ack_queue: "queue.Queue[dict]",
                                 ts_val = None
                             # we need a Qt-thread call; simplest: emit via existing bridge
                             bridge.command_received.emit({"type": "__tray_status__", "last_command_ts": ts_val})
+                            catalogue = data.get("catalogue")
+                            if catalogue:
+                                want_sessions, want_blocks = compute_wanted(catalogue)
+                                if want_sessions or want_blocks:
+                                    await ws.send(json.dumps({
+                                        "type": "catalogue_sync",
+                                        "want_sessions": want_sessions,
+                                        "want_blocks": want_blocks,
+                                    }))
                             continue
 
                         if cmd_type == "enroll_ok":
@@ -682,6 +731,7 @@ def main() -> None:
                 intensity=cmd.get("intensity", None),
                 body=str(cmd.get("body") or ""),
             )
+            update_manifest_entry("blocks", str(cmd.get("title")), int(time.time()))
             _injection_notifier.add(InjectEvent(kind="block", title=stem))
             return
 
@@ -694,6 +744,7 @@ def main() -> None:
                 intensity=cmd.get("intensity", None),
                 session_json=dict(cmd.get("session_json") or {}),
             )
+            update_manifest_entry("sessions", str(cmd.get("title")), int(time.time()))
             _injection_notifier.add(InjectEvent(kind="session", title=stem))
             return
 

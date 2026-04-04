@@ -124,22 +124,22 @@ def init_db() -> None:
         
         # Broadcast history (for "send to all" / "send to paid" catch-up)
         conn.execute("""
-        CREATE TABLE IF NOT EXISTS broadcast_events (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            audience TEXT NOT NULL,          -- 'all' or 'paid'
-            payload_json TEXT NOT NULL,
-            created_at INTEGER NOT NULL
-        );
-        """)
+                     CREATE TABLE IF NOT EXISTS broadcast_catalogue_sessions (
+                         title TEXT PRIMARY KEY,
+                         audience TEXT NOT NULL,
+                         payload_json TEXT NOT NULL,
+                         updated_at INTEGER NOT NULL
+                     );
+                     """)
 
-        # Per-device cursor into broadcast history
         conn.execute("""
-        CREATE TABLE IF NOT EXISTS device_broadcast_state (
-            device_id TEXT PRIMARY KEY,
-            last_all_id INTEGER NOT NULL DEFAULT 0,
-            last_paid_id INTEGER NOT NULL DEFAULT 0
-        );
-        """)
+                     CREATE TABLE IF NOT EXISTS broadcast_catalogue_blocks (
+                         title TEXT PRIMARY KEY,
+                         audience TEXT NOT NULL,
+                         payload_json TEXT NOT NULL,
+                         updated_at INTEGER NOT NULL
+                     );
+                     """)
         
         _try_alter(conn, "ALTER TABLE devices ADD COLUMN tier TEXT NOT NULL DEFAULT 'free';")
 
@@ -635,136 +635,70 @@ def queue_delivery(device_id: str, payload: dict) -> None:
         )
         conn.commit()
         
-async def send_payload_expanding_sessions(ws: WebSocket, payload: dict) -> None:
-    """
-    If payload is an inject_session, emit inject_block payloads first (same ws),
-    then emit the session payload.
-    """
-    if payload.get("type") == "inject_session":
-        title = str(payload.get("title") or "").strip()
-        plan_obj = payload.get("session_json") or {}
-        if title:
-            for bt in extract_referenced_blocks_from_plan(plan_obj):
-                await ws.send_json(build_inject_block_payload(bt))
-        await ws.send_json(payload)
-        return
-
-    await ws.send_json(payload)
-    
-async def drain_pending_deliveries(device_id: str, ws: WebSocket) -> None:
-    with sqlite3.connect(DB_PATH) as conn:
-        rows = conn.execute(
-            "SELECT id, payload_json FROM pending_deliveries WHERE device_id = ? AND delivered_at IS NULL ORDER BY id ASC",
-            (device_id,),
-        ).fetchall()
-
-    for delivery_id, payload_json in rows:
-        payload = _json_loads(payload_json) or {}
-        await send_payload_expanding_sessions(ws, payload)
-
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.execute(
-                "UPDATE pending_deliveries SET delivered_at = ? WHERE id = ?",
-                (int(time.time()), delivery_id),
-            )
-            conn.commit()
-            
-async def replay_broadcast_history(device_id: str, ws: WebSocket) -> None:
-    """
-    Sends any missed broadcast_events to this device, then advances its cursor.
-    """
-    ensure_device_broadcast_state(device_id)
-    last_all, last_paid = get_device_broadcast_cursor(device_id)
-
-    # Always replay "all"
-    all_events = load_broadcast_events_since(audience="all", after_id=last_all)
-    max_all = last_all
-    for eid, payload in all_events:
-        await send_payload_expanding_sessions(ws, payload)
-        max_all = eid
-
-    # Replay "paid" only if device is currently paid
-    tier = get_device_tier(device_id)
-    max_paid = last_paid
-    if tier == "paid":
-        paid_events = load_broadcast_events_since(audience="paid", after_id=last_paid)
-        for eid, payload in paid_events:
-            await send_payload_expanding_sessions(ws, payload)
-            max_paid = eid
-
-    # Advance cursors only after successful sends
-    if max_all != last_all or max_paid != last_paid:
-        set_device_broadcast_cursor(device_id, last_all_id=max_all, last_paid_id=max_paid)
-            
-def record_broadcast_event(audience: str, payload: dict) -> int:
-    """
-    Persists a broadcast event and returns its autoincrement id.
-    audience: 'all' | 'paid'
-    """
-    audience = (audience or "").strip().lower()
-    if audience not in ("all", "paid"):
-        raise ValueError("audience must be 'all' or 'paid'")
-
+def catalogue_upsert_session(title: str, audience: str, payload: dict) -> None:
     now = int(time.time())
     with sqlite3.connect(DB_PATH) as conn:
-        cur = conn.execute(
-            "INSERT INTO broadcast_events (audience, payload_json, created_at) VALUES (?, ?, ?)",
-            (audience, _json_dumps(payload), now),
-        )
+        conn.execute("""
+        INSERT INTO broadcast_catalogue_sessions (title, audience, payload_json, updated_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(title) DO UPDATE SET
+            audience=excluded.audience,
+            payload_json=excluded.payload_json,
+            updated_at=excluded.updated_at
+        """, (title, audience, _json_dumps(payload), now))
         conn.commit()
-        return int(cur.lastrowid)
-    
-def ensure_device_broadcast_state(device_id: str) -> None:
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.execute(
-            "INSERT OR IGNORE INTO device_broadcast_state (device_id, last_all_id, last_paid_id) VALUES (?, 0, 0)",
-            (device_id,),
-        )
-        conn.commit()
-        
-def load_broadcast_events_since(*, audience: str, after_id: int) -> list[tuple[int, dict]]:
-    with sqlite3.connect(DB_PATH) as conn:
-        rows = conn.execute(
-            "SELECT id, payload_json FROM broadcast_events WHERE audience = ? AND id > ? ORDER BY id ASC",
-            (audience, int(after_id)),
-        ).fetchall()
 
-    out: list[tuple[int, dict]] = []
-    for eid, payload_json in rows:
-        payload = _json_loads(payload_json) or {}
-        out.append((int(eid), payload))
-    return out
-
-def get_device_broadcast_cursor(device_id: str) -> tuple[int, int]:
+def catalogue_upsert_block(title: str, audience: str, payload: dict) -> None:
+    now = int(time.time())
     with sqlite3.connect(DB_PATH) as conn:
-        row = conn.execute(
-            "SELECT last_all_id, last_paid_id FROM device_broadcast_state WHERE device_id = ?",
-            (device_id,),
-        ).fetchone()
-    if not row:
-        return (0, 0)
-    return (int(row[0]), int(row[1]))
-
-def set_device_broadcast_cursor(device_id: str, *, last_all_id: int | None = None, last_paid_id: int | None = None) -> None:
-    fields = []
-    vals = []
-    if last_all_id is not None:
-        fields.append("last_all_id = ?")
-        vals.append(int(last_all_id))
-    if last_paid_id is not None:
-        fields.append("last_paid_id = ?")
-        vals.append(int(last_paid_id))
-    if not fields:
-        return
-
-    vals.append(device_id)
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.execute(
-            f"UPDATE device_broadcast_state SET {', '.join(fields)} WHERE device_id = ?",
-            tuple(vals),
-        )
+        conn.execute("""
+        INSERT INTO broadcast_catalogue_blocks (title, audience, payload_json, updated_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(title) DO UPDATE SET
+            audience=excluded.audience,
+            payload_json=excluded.payload_json,
+            updated_at=excluded.updated_at
+        """, (title, audience, _json_dumps(payload), now))
         conn.commit()
             
+def get_catalogue_manifest(tier: str) -> dict:
+    audiences = ["all", "paid"] if tier == "paid" else ["all"]
+    placeholders = ",".join("?" * len(audiences))
+
+    with sqlite3.connect(DB_PATH) as conn:
+        session_rows = conn.execute(f"""
+            SELECT title, updated_at FROM broadcast_catalogue_sessions
+            WHERE audience IN ({placeholders})
+            ORDER BY title COLLATE NOCASE
+        """, audiences).fetchall()
+
+        block_rows = conn.execute(f"""
+            SELECT title, updated_at FROM broadcast_catalogue_blocks
+            WHERE audience IN ({placeholders})
+            ORDER BY title COLLATE NOCASE
+        """, audiences).fetchall()
+
+    return {
+        "sessions": [{"title": r[0], "updated_at": r[1]} for r in session_rows],
+        "blocks": [{"title": r[0], "updated_at": r[1]} for r in block_rows],
+    }
+
+def get_catalogue_session_payload(title: str) -> dict | None:
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            "SELECT payload_json FROM broadcast_catalogue_sessions WHERE title = ?",
+            (title,)
+        ).fetchone()
+    return _json_loads(row[0]) if row else None
+
+def get_catalogue_block_payload(title: str) -> dict | None:
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            "SELECT payload_json FROM broadcast_catalogue_blocks WHERE title = ?",
+            (title,)
+        ).fetchone()
+    return _json_loads(row[0]) if row else None
+
 def build_inject_block_payload(title: str) -> dict:
     with sqlite3.connect(DB_PATH) as conn:
         row = conn.execute(
@@ -783,6 +717,7 @@ def build_inject_block_payload(title: str) -> dict:
         "tags": tags if isinstance(tags, list) else [],
         "intensity": intensity,
         "body": body or "",
+        "updated_at": int(time.time()), 
     }
 
 def build_inject_session_payload(title: str) -> dict:
@@ -811,6 +746,7 @@ def build_inject_session_payload(title: str) -> dict:
         "tags": tags if isinstance(tags, list) else [],
         "intensity": intensity,
         "session_json": session_json,
+        "updated_at": int(time.time()), 
     }
 
 def resolve_target_device_ids(*, target: str, device_ids_csv: str | None = None) -> list[str]:
@@ -1537,10 +1473,6 @@ async def set_tier_from_device_page(
 
     pushed = await push_tier_update(device_id)
     suffix = " (pushed live)" if pushed else " (device offline)"
-    if pushed and tier.strip().lower() == "paid":
-        ws = hub.connections[device_id]
-        if ws is not None:
-            await replay_broadcast_history(device_id, ws)
     return PlainTextResponse(f"Tier set to: {tier.strip().lower()}{suffix}")
 
 @app.post("/device/{device_id}/message")
@@ -2011,16 +1943,15 @@ async def inject_session_to_device(device_id: str, session_title: str = Form(...
 
 @app.post("/inject/block")
 async def inject_block_broadcast(
-    target: str = Form(...),                 # "device" | "all" | "paid"
+    target: str = Form(...),
     block_title: str = Form(...),
-    device_ids: str = Form(""),              # only used when target="device"
+    device_ids: str = Form(""),
 ):
     targets = resolve_target_device_ids(target=target, device_ids_csv=device_ids)
-
     payload = build_inject_block_payload(block_title.strip())
-    
+
     if target.strip().lower() in ("all", "paid"):
-        record_broadcast_event(target.strip().lower(), payload)
+        catalogue_upsert_block(block_title.strip(), target.strip().lower(), payload)
 
     for did in targets:
         await push_or_queue_injection(device_id=did, payload=payload)
@@ -2029,16 +1960,15 @@ async def inject_block_broadcast(
 
 @app.post("/inject/session")
 async def inject_session_broadcast(
-    target: str = Form(...),                 # "device" | "all" | "paid"
+    target: str = Form(...),
     session_title: str = Form(...),
-    device_ids: str = Form(""),              # only used when target="device"
+    device_ids: str = Form(""),
 ):
     targets = resolve_target_device_ids(target=target, device_ids_csv=device_ids)
-
     payload = build_inject_session_payload(session_title.strip())
-    
+
     if target.strip().lower() in ("all", "paid"):
-        record_broadcast_event(target.strip().lower(), payload)
+        catalogue_upsert_session(session_title.strip(), target.strip().lower(), payload)
 
     for did in targets:
         await push_or_queue_session_with_blocks(did, session_title.strip())
@@ -2147,9 +2077,6 @@ async def ws_endpoint(ws: WebSocket):
             "type": "tier",
             "tier": tier,   # "free" or "paid"
         }))
-        
-        await replay_broadcast_history(device_id, ws)
-        await drain_pending_deliveries(device_id, ws)
 
         # 4) Keep the connection alive (we'll fill this in next chunk)
         while True:
@@ -2163,14 +2090,55 @@ async def ws_endpoint(ws: WebSocket):
             mtype = msg.get("type")
 
             if mtype == "heartbeat":
+                tier = get_device_tier(device_id)
+                manifest = get_catalogue_manifest(tier)
                 await ws.send_text(json.dumps({
                     "type": "server_status",
                     "last_command_ts": hub.last_command_ts,
+                    "catalogue": manifest,
                 }))
                 hub.update_last_seen(device_id)
                 update_device_metadata(device_id, None, None)
             elif mtype == "ack":
                 hub.handle_ack(device_id, msg)
+            elif mtype == "catalogue_sync":
+                tier = get_device_tier(device_id)
+                allowed_audiences = ["all", "paid"] if tier == "paid" else ["all"]
+                
+                want_sessions = [str(t) for t in (msg.get("want_sessions") or [])]
+                want_blocks = [str(t) for t in (msg.get("want_blocks") or [])]
+                
+                # send blocks first
+                for title in want_blocks:
+                    payload = get_catalogue_block_payload(title)
+                    if payload is None:
+                        continue
+                    # verify audience
+                    with sqlite3.connect(DB_PATH) as conn:
+                        row = conn.execute(
+                            "SELECT audience FROM broadcast_catalogue_blocks WHERE title = ?",
+                            (title,)
+                        ).fetchone()
+                    if row and row[0] in allowed_audiences:
+                        await ws.send_text(json.dumps(payload))
+                
+                # then sessions (blocks first within each session)
+                for title in want_sessions:
+                    payload = get_catalogue_session_payload(title)
+                    if payload is None:
+                        continue
+                    with sqlite3.connect(DB_PATH) as conn:
+                        row = conn.execute(
+                            "SELECT audience FROM broadcast_catalogue_sessions WHERE title = ?",
+                            (title,)
+                        ).fetchone()
+                    if row and row[0] in allowed_audiences:
+                        plan_obj = payload.get("session_json") or {}
+                        for bt in extract_referenced_blocks_from_plan(plan_obj):
+                            block_payload = get_catalogue_block_payload(bt)
+                            if block_payload:
+                                await ws.send_text(json.dumps(block_payload))
+                        await ws.send_text(json.dumps(payload))
             elif mtype == "session_started":
                 estimated_s = float(msg.get("estimated_s") or 0)
                 started_at = float(msg.get("started_at") or time.time())
