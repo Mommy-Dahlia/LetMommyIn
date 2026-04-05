@@ -637,6 +637,15 @@ def queue_delivery(device_id: str, payload: dict) -> None:
         
 def catalogue_upsert_session(title: str, audience: str, payload: dict) -> None:
     now = int(time.time())
+    
+    plan_obj = payload.get("session_json") or {}
+    for block_title in extract_referenced_blocks_from_plan(plan_obj):
+        try:
+            block_payload = build_inject_block_payload(block_title)
+            catalogue_upsert_block(block_title, audience, block_payload)
+        except Exception:
+            pass
+        
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute("""
         INSERT INTO broadcast_catalogue_sessions (title, audience, payload_json, updated_at)
