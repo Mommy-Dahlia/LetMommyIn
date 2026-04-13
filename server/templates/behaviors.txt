@@ -1,0 +1,242 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Behavior Content</title>
+    <script src="https://unpkg.com/htmx.org@1.9.12"></script>
+    <link rel="stylesheet" href="/static/admin.css">
+    <style>
+      .section { margin-bottom: 2rem; }
+      .entry-list { margin-bottom: 1rem; }
+      .entry-row { display: flex; gap: 8px; align-items: center; margin-bottom: 4px; }
+      textarea { width: 100%; }
+      .muted { color: #666; font-size: 0.9em; }
+      pre { white-space: pre-wrap; }
+    </style>
+  </head>
+  <body>
+    <p>
+      <a href="/">← Devices</a> |
+      <a href="/admin/blocks/page">Blocks</a> |
+      <a href="/sessions">Sessions</a> |
+      <a href="/admin/behaviors/page">Behaviors</a>
+    </p>
+
+    <h1>Behavior Content</h1>
+
+    <!-- ==================== TOYS AND TEASES ==================== -->
+    <div class="section">
+      <h2>Toys and Teases</h2>
+
+      <div class="entry-list">
+        <b>Existing entries:</b>
+        {% if toys %}
+          {% for t in toys %}
+          <div class="entry-row">
+            <span>{{ t.name }}</span>
+            <span class="muted">({{ t.audience }})</span>
+            <button type="button" onclick="loadEntry('toys_and_teases', '{{ t.name }}')">Load</button>
+            <form hx-post="/admin/behaviors/delete" hx-target="#toys-result" hx-swap="innerHTML" style="display:inline;">
+              <input type="hidden" name="name" value="{{ t.name }}" />
+              <input type="hidden" name="behavior_type" value="toys_and_teases" />
+              <button type="submit">Delete</button>
+            </form>
+          </div>
+          {% endfor %}
+        {% else %}
+          <div class="muted">No entries yet.</div>
+        {% endif %}
+      </div>
+
+      <form hx-post="/admin/behaviors/save/toys_and_teases" hx-target="#toys-result" hx-swap="innerHTML">
+        <p>
+          <label>Entry name<br/>
+            <input name="name" id="toys-name" required style="width: 24rem;" />
+          </label>
+        </p>
+        <p>
+          <label>Audience<br/>
+            <select name="audience">
+              <option value="all">All</option>
+              <option value="paid">Paid</option>
+            </select>
+          </label>
+        </p>
+        <p>
+          <label>Script (use #N for delay in seconds per line)<br/>
+            <textarea name="script" id="toys-script" rows="10" placeholder="Feel Mommy lean over you... #8&#10;Tap~ #2&#10;Tap~ #2"></textarea>
+          </label>
+        </p>
+        <p>
+          <label>
+            <input type="checkbox" name="overwrite" value="1" />
+            Overwrite if name exists
+          </label>
+        </p>
+        <button type="submit">Save</button>
+      </form>
+      <pre id="toys-result"></pre>
+    </div>
+
+    <!-- ==================== RULES AND TASKS ==================== -->
+    <div class="section">
+      <h2>Rules and Tasks</h2>
+
+      <div class="entry-list">
+        <b>Existing entries:</b>
+        {% if rules %}
+          {% for r in rules %}
+          <div class="entry-row">
+            <span>{{ r.name }}</span>
+            <span class="muted">({{ r.audience }})</span>
+            <button type="button" onclick="loadEntry('rules_and_tasks', '{{ r.name }}')">Load</button>
+            <form hx-post="/admin/behaviors/delete" hx-target="#rules-result" hx-swap="innerHTML" style="display:inline;">
+              <input type="hidden" name="name" value="{{ r.name }}" />
+              <input type="hidden" name="behavior_type" value="rules_and_tasks" />
+              <button type="submit">Delete</button>
+            </form>
+          </div>
+          {% endfor %}
+        {% else %}
+          <div class="muted">No entries yet.</div>
+        {% endif %}
+      </div>
+
+      <form hx-post="/admin/behaviors/save/rules_and_tasks" hx-target="#rules-result" hx-swap="innerHTML">
+        <p>
+          <label>Entry name<br/>
+            <input name="name" id="rules-name" required style="width: 24rem;" />
+          </label>
+        </p>
+        <p>
+          <label>Audience<br/>
+            <select name="audience">
+              <option value="all">All</option>
+              <option value="paid">Paid</option>
+            </select>
+          </label>
+        </p>
+        <p>
+          <label>Task text<br/>
+            <textarea name="task" id="rules-task" rows="4" required></textarea>
+          </label>
+        </p>
+        <p>
+          <label>Check-in text (shown after timer)<br/>
+            <textarea name="check_text" id="rules-check" rows="2" required></textarea>
+          </label>
+        </p>
+        <p>
+          <label>Timer (minutes)<br/>
+            <input name="timer_minutes" id="rules-timer" type="number" min="1" value="5" required />
+          </label>
+        </p>
+        <p>
+          <label>Reward text<br/>
+            <textarea name="reward" id="rules-reward" rows="3" required></textarea>
+          </label>
+        </p>
+        <p>
+          <label>Punishment text<br/>
+            <textarea name="punishment" id="rules-punishment" rows="3" required></textarea>
+          </label>
+        </p>
+        <p>
+          <label>
+            <input type="checkbox" name="overwrite" value="1" />
+            Overwrite if name exists
+          </label>
+        </p>
+        <button type="submit">Save</button>
+      </form>
+      <pre id="rules-result"></pre>
+    </div>
+
+    <!-- ==================== WEB-AIDED TASKS ==================== -->
+    <div class="section">
+      <h2>Web-Aided Tasks</h2>
+
+      <div class="entry-list">
+        <b>Existing entries:</b>
+        {% if web %}
+          {% for w in web %}
+          <div class="entry-row">
+            <span>{{ w.name }}</span>
+            <span class="muted">({{ w.audience }})</span>
+            <button type="button" onclick="loadEntry('web_aided_tasks', '{{ w.name }}')">Load</button>
+            <form hx-post="/admin/behaviors/delete" hx-target="#web-result" hx-swap="innerHTML" style="display:inline;">
+              <input type="hidden" name="name" value="{{ w.name }}" />
+              <input type="hidden" name="behavior_type" value="web_aided_tasks" />
+              <button type="submit">Delete</button>
+            </form>
+          </div>
+          {% endfor %}
+        {% else %}
+          <div class="muted">No entries yet.</div>
+        {% endif %}
+      </div>
+
+      <form hx-post="/admin/behaviors/save/web_aided_tasks" hx-target="#web-result" hx-swap="innerHTML">
+        <p>
+          <label>Entry name<br/>
+            <input name="name" id="web-name" required style="width: 24rem;" />
+          </label>
+        </p>
+        <p>
+          <label>Audience<br/>
+            <select name="audience">
+              <option value="all">All</option>
+              <option value="paid">Paid</option>
+            </select>
+          </label>
+        </p>
+        <p>
+          <label>URL<br/>
+            <input name="url" id="web-url" required style="width: 100%;" placeholder="https://..." />
+          </label>
+        </p>
+        <p>
+          <label>Message<br/>
+            <textarea name="message" id="web-message" rows="3" required></textarea>
+          </label>
+        </p>
+        <p>
+          <label>
+            <input type="checkbox" name="overwrite" value="1" />
+            Overwrite if name exists
+          </label>
+        </p>
+        <button type="submit">Save</button>
+      </form>
+      <pre id="web-result"></pre>
+    </div>
+
+    <script>
+      function loadEntry(type, name) {
+        fetch(`/admin/behaviors/load?name=${encodeURIComponent(name)}&behavior_type=${encodeURIComponent(type)}`)
+          .then(r => r.json())
+          .then(data => {
+            if (type === 'toys_and_teases') {
+              document.getElementById('toys-name').value = data.name;
+              // reconstruct script from messages array
+              const lines = (data.entry.messages || [])
+                .map(m => `${m.text} #${m.delay_seconds}`)
+                .join('\n');
+              document.getElementById('toys-script').value = lines;
+            } else if (type === 'rules_and_tasks') {
+              document.getElementById('rules-name').value = data.name;
+              document.getElementById('rules-task').value = data.entry.task || '';
+              document.getElementById('rules-check').value = data.entry.check_text || '';
+              document.getElementById('rules-timer').value = data.entry.timer_minutes || 5;
+              document.getElementById('rules-reward').value = data.entry.reward || '';
+              document.getElementById('rules-punishment').value = data.entry.punishment || '';
+            } else if (type === 'web_aided_tasks') {
+              document.getElementById('web-name').value = data.name;
+              document.getElementById('web-url').value = data.entry.url || '';
+              document.getElementById('web-message').value = data.entry.message || '';
+            }
+          });
+      }
+    </script>
+  </body>
+</html>

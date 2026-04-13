@@ -9,6 +9,7 @@ from pyside_session_warning import run_session_warning_dialog
 from PySide6.QtCore import QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtMultimedia import QSoundEffect
+from session_runner import _apply_pns
 import os
 
 def _popup_delay():
@@ -153,6 +154,11 @@ def parse_command(data):
         case "show_message":
             title = data.get("title")
             body = data.get("body")
+            
+            if title:
+                title = _apply_pns(str(title))
+            if body:
+                body = _apply_pns(str(body))
             
             lifespan_s = data.get("lifespan_s")
             if lifespan_s is None:

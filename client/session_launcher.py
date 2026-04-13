@@ -3,11 +3,13 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QListWidget, QPushButton,
-    QMessageBox, QAbstractItemView, QTextEdit
+    QMessageBox, QAbstractItemView, QTextEdit, QListWidgetItem
 )
+from PySide6.QtCore import Qt
 
 
 def find_session_file(content_roots: list[Path], session_stem: str) -> Path | None:
@@ -88,12 +90,17 @@ class SessionLauncherResult:
 
 
 class SessionLauncherDialog(QDialog):
-    def __init__(self, *, content_roots: list[Path], compiler, parent=None):
+    def __init__(self, *, content_roots: list[Path], compiler,
+                 allowed_sessions: list[str] | None = None,
+                 on_allowed_changed: Callable[[list[str]], None] | None = None,
+                 parent=None):
         super().__init__(parent)
         self.setWindowTitle("Sessions")
 
         self._content_roots = content_roots
         self._compiler = compiler  # your SessionCompiler instance
+        self._allowed_sessions = list(allowed_sessions or [])
+        self._on_allowed_changed = on_allowed_changed
 
         root = QVBoxLayout(self)
 
@@ -147,9 +154,17 @@ class SessionLauncherDialog(QDialog):
         self.btn_run.clicked.connect(self._run)
         self.btn_preview.clicked.connect(self._preview)
         self.sessions.currentItemChanged.connect(self._on_session_changed)
+        self.sessions.itemChanged.connect(self._on_item_changed)
 
+        self.sessions.blockSignals(True)
         for stem in list_session_stems(self._content_roots):
-            self.sessions.addItem(stem)
+            item = QListWidgetItem(stem)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(
+                Qt.Checked if stem in self._allowed_sessions else Qt.Unchecked
+            )
+            self.sessions.addItem(item)
+        self.sessions.blockSignals(False)
 
         if self.sessions.count() > 0:
             self.sessions.setCurrentRow(0)
@@ -209,3 +224,14 @@ class SessionLauncherDialog(QDialog):
         stem, path = sel
         self.result = SessionLauncherResult(session_stem=stem, session_path=path)
         self.accept()
+        
+    def _on_item_changed(self, item: QListWidgetItem) -> None:
+        stem = item.text()
+        if item.checkState() == Qt.Checked:
+            if stem not in self._allowed_sessions:
+                self._allowed_sessions.append(stem)
+        else:
+            if stem in self._allowed_sessions:
+                self._allowed_sessions.remove(stem)
+        if self._on_allowed_changed is not None:
+            self._on_allowed_changed(list(self._allowed_sessions))

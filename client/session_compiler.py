@@ -67,7 +67,6 @@ class SessionCompiler:
             image_csv (may be None)
         """
         data = json.loads(session_path.read_text(encoding="utf-8"))
-        name = str(data.get("name") or session_path.stem)
         plan = data.get("plan")
         if not isinstance(plan, list):
             raise ValueError("Session JSON must have a list field: plan")

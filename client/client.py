@@ -21,7 +21,7 @@ from PySide6.QtWidgets import QApplication, QInputDialog, QMessageBox, QDialog
 from PySide6.QtGui import QIcon
 from pynput import keyboard
 
-from parser import parse_command, set_session_runner, set_audio_manager, set_subliminal_manager, set_wfm_manager, set_ack_queue, set_injection_handler
+from parser import parse_command, _apply_client_session_defaults, set_session_runner, set_audio_manager, set_subliminal_manager, set_wfm_manager, set_ack_queue, set_injection_handler
 from pyside_show_message import close_all_messages
 from pyside_show_image import close_all_images
 from pyside_show_writeforme import close_all_wfm
@@ -41,6 +41,8 @@ from session_customizer import SessionCustomizerDialog
 from session_launcher import SessionLauncherDialog
 from ui_theme import apply_app_theme
 from pyside_injection_summary import InjectionBatchNotifier, InjectEvent
+from behavior_manager import BehaviorManager, load_behaviors, save_behaviors
+from behavior_settings_dialog import BehaviorSettingsDialog
 
 _injection_notifier = InjectionBatchNotifier(quiet_ms=800)
 
@@ -133,12 +135,12 @@ MANIFEST_PATH = CONFIG_DIR / "catalogue_manifest.json"
 
 def load_local_manifest() -> dict:
     if not MANIFEST_PATH.exists():
-        return {"sessions": {}, "blocks": {}}
+        return {"sessions": {}, "blocks": {}, "behaviors": {}}
     try:
         with MANIFEST_PATH.open("r", encoding="utf-8") as f:
             return json.load(f)
     except Exception:
-        return {"sessions": {}, "blocks": {}}
+        return {"sessions": {}, "blocks": {}, "behaviors": {}}
 
 def save_local_manifest(manifest: dict) -> None:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
@@ -150,10 +152,18 @@ def update_manifest_entry(kind: str, title: str, updated_at: int) -> None:
     manifest[kind][title] = updated_at
     save_local_manifest(manifest)
     
+def update_behavior_manifest_entry(behavior_type: str, name: str, updated_at: int) -> None:
+    manifest = load_local_manifest()
+    if "behaviors" not in manifest:
+        manifest["behaviors"] = {}
+    manifest["behaviors"][f"{behavior_type}:{name}"] = updated_at
+    save_local_manifest(manifest)
+    
 def compute_wanted(server_catalogue: dict) -> tuple[list[str], list[str]]:
     manifest = load_local_manifest()
     local_sessions = manifest.get("sessions", {})
     local_blocks = manifest.get("blocks", {})
+    local_behaviors = manifest.get("behaviors", {})
 
     want_sessions = [
         s["title"] for s in server_catalogue.get("sessions", [])
@@ -166,8 +176,15 @@ def compute_wanted(server_catalogue: dict) -> tuple[list[str], list[str]]:
         if b["title"] not in local_blocks
         or local_blocks[b["title"]] < b["updated_at"]
     ]
+    
+    want_behaviors = [
+        (b["name"], b["behavior_type"])
+        for b in server_catalogue.get("behaviors", [])
+        if f"{b['behavior_type']}:{b['name']}" not in local_behaviors
+        or local_behaviors[f"{b['behavior_type']}:{b['name']}"] < b["updated_at"]
+    ]
 
-    return want_sessions, want_blocks
+    return want_sessions, want_blocks, want_behaviors
 
 def load_config() -> ClientConfig | None:
     if not CONFIG_PATH.exists():
@@ -210,6 +227,13 @@ class CommandDispatcher(QObject):
             if hasattr(self, "cfg") and self.cfg is not None:
                 self.cfg.tier = tier
                 save_config(self.cfg)
+                
+            if hasattr(self, "behavior_manager") and self.behavior_manager is not None:
+                if tier == "paid":
+                    self.behavior_manager.start()
+                else:
+                    self.behavior_manager._general_timer.stop()
+                    self.behavior_manager._autodrainer_timer.stop()
 
             # 2) update any in-memory UI settings (optional but useful)
             # If you don't want ui_settings to track tier yet, skip this.
@@ -403,6 +427,36 @@ def write_injected_session(local_root: Path, *, title: str, summary: str, tags: 
     (sessions_dir / f"{stem}.meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
     return stem
 
+def write_injected_behavior(local_root: Path, *, behavior_type: str, name: str, entry: dict) -> None:
+    out_dir = local_root / "content" / "behaviors"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    pool_path = out_dir / f"{behavior_type}.json"
+
+    # load existing pool
+    if pool_path.exists():
+        try:
+            with pool_path.open("r", encoding="utf-8") as f:
+                pool = json.load(f)
+        except Exception:
+            pool = []
+    else:
+        pool = []
+
+    # find and replace existing entry with same name, or append
+    entry_with_name = dict(entry)
+    entry_with_name["_name"] = name
+
+    existing_idx = next(
+        (i for i, e in enumerate(pool) if e.get("_name") == name), None
+    )
+    if existing_idx is not None:
+        pool[existing_idx] = entry_with_name
+    else:
+        pool.append(entry_with_name)
+
+    with pool_path.open("w", encoding="utf-8") as f:
+        json.dump(pool, f, indent=2, ensure_ascii=False)
+
 def prompt_username() -> str:
     while True:
         username, ok = QInputDialog.getText(
@@ -566,12 +620,16 @@ async def run_client(cfg, bridge: CommandBridge, ack_queue: "queue.Queue[dict]",
                             bridge.command_received.emit({"type": "__tray_status__", "last_command_ts": ts_val})
                             catalogue = data.get("catalogue")
                             if catalogue:
-                                want_sessions, want_blocks = compute_wanted(catalogue)
-                                if want_sessions or want_blocks:
+                                want_sessions, want_blocks, want_behaviors = compute_wanted(catalogue)
+                                if want_sessions or want_blocks or want_behaviors:
                                     await ws.send(json.dumps({
                                         "type": "catalogue_sync",
                                         "want_sessions": want_sessions,
                                         "want_blocks": want_blocks,
+                                        "want_behaviors": [
+                                            {"name": n, "behavior_type": bt} 
+                                            for n, bt in want_behaviors
+                                        ],
                                     }))
                             continue
 
@@ -747,6 +805,21 @@ def main() -> None:
             update_manifest_entry("sessions", str(cmd.get("title")), int(time.time()))
             _injection_notifier.add(InjectEvent(kind="session", title=stem))
             return
+        
+        if t == "inject_behavior":
+            behavior_type = str(cmd.get("behavior_type") or "")
+            name = str(cmd.get("name") or "")
+            entry = cmd.get("entry") or {}
+            updated_at = cmd.get("updated_at") or int(time.time())
+            
+            if behavior_type not in ("toys_and_teases", "rules_and_tasks", "web_aided_tasks"):
+                logging.warning("Unknown behavior_type in inject_behavior: %s", behavior_type)
+                return
+
+            write_injected_behavior(local_root, behavior_type=behavior_type, name=name, entry=entry)
+            update_behavior_manifest_entry(behavior_type, name, updated_at)
+            _injection_notifier.add(InjectEvent(kind="behavior", title=f"{behavior_type}: {name}"))
+            return
 
     set_injection_handler(_handle_injection)
 
@@ -810,6 +883,16 @@ def main() -> None:
     set_subliminal_manager(subliminal_manager)
     wfm_manager = WfmManager()
     set_wfm_manager(wfm_manager)
+    behavior_manager = BehaviorManager(
+        config_dir=CONFIG_DIR,
+        session_runner=session_runner,
+        dispatch_command=dispatcher.handle_command,
+        get_session_path=lambda stem: next(
+            (p for name, p in get_session_choices() if name == stem), None
+        ),
+    )
+    if getattr(cfg, "tier", "free") == "paid":
+        behavior_manager.start()
     # --- Local sessions compiler (sessions/*.json + blocks/*.txt) ---
     # Dev: if there is a sessions/ folder next to this file, use it.
     content_roots = get_content_roots(CONFIG_DIR)
@@ -833,6 +916,8 @@ def main() -> None:
             subliminal_manager.stop()
             audio_manager.stop()
             stop_gif_overlays()
+            behavior_manager._general_timer.stop()
+            behavior_manager._autodrainer_timer.stop()
 
             # close dialogs
             close_all_messages()
@@ -924,6 +1009,7 @@ def main() -> None:
     
     dispatcher.cfg = cfg
     dispatcher.tray = tray
+    dispatcher.behavior_manager = behavior_manager
 
     tray.audio_device_changed.connect(lambda dev_id: audio_manager.set_output_device_by_id(dev_id))
     tray.set_image_save_enabled_checked(cfg.image_save_enabled)
@@ -934,9 +1020,10 @@ def main() -> None:
             # Optional: log what got chosen (useful for debugging randomness)
             logging.info("Running local session=%s chosen_blocks=%s", compiled.name, compiled.chosen_blocks)
 
+            steps = _apply_client_session_defaults(compiled.steps)
             session_runner.start(
                 session_id=f"local_{compiled.name}",
-                steps=compiled.steps,
+                steps=steps,
             )
         except Exception as e:
             logging.exception("Failed to run local session: %s", session_path)
@@ -986,9 +1073,17 @@ def main() -> None:
         set_image_save_dir(cfg.image_save_dir)
         
     def open_session_launcher():
+        def _on_allowed_changed(new_allowed: list[str]) -> None:
+            behaviors = load_behaviors(CONFIG_DIR)
+            behaviors["session"]["allowed_sessions"] = new_allowed
+            save_behaviors(CONFIG_DIR, behaviors)
+            behavior_manager.update_behaviors(behaviors)
+        
         dlg = SessionLauncherDialog(
             content_roots=content_roots,
             compiler=compiler,
+            allowed_sessions=load_behaviors(CONFIG_DIR)["session"]["allowed_sessions"],
+            on_allowed_changed=_on_allowed_changed,
             parent=None,
             )
         if dlg.exec() == QDialog.Accepted and dlg.result:
@@ -1008,6 +1103,19 @@ def main() -> None:
         if dlg.exec() == QDialog.Accepted and dlg.result:
             logging.info("Saved custom session: %s", dlg.result.session_path)
             tray.refresh_sessions_menu()
+            
+    def open_behavior_settings():
+        if getattr(cfg, "tier", "free") != "paid":
+            QMessageBox.information(None, "Locked", "Automated behaviors are a paid feature.")
+            return
+        dlg = BehaviorSettingsDialog(
+            config_dir=CONFIG_DIR,
+            content_roots=content_roots,
+            compiler=compiler,
+            parent=None,
+        )
+        dlg.behaviors_changed.connect(behavior_manager.update_behaviors)
+        dlg.exec()
             
     def on_session_receive_mode_changed(mode: str) -> None:
         mode = (mode or "").strip().lower()
@@ -1029,6 +1137,12 @@ def main() -> None:
     tray.default_audio_url_changed.connect(on_default_audio_changed)
     tray.default_overlay_changed.connect(on_default_overlay_changed)
     tray.toggle_session_pause.connect(session_runner.toggle_pause)
+    
+    tray.behavior_settings_requested.connect(open_behavior_settings)
+
+    tray.fire_next_drain.connect(behavior_manager.trigger_drain) 
+
+    tray.fire_next_event.connect(behavior_manager.trigger_next_event)
 
     bridge.command_received.connect(dispatcher.handle_command)
 

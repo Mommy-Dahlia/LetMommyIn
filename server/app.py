@@ -65,7 +65,6 @@ def init_db() -> None:
         conn.execute("PRAGMA journal_mode=WAL;")
         conn.execute("PRAGMA foreign_keys=ON;")
 
-        # One-time enrollment codes (hashed). "used_at" set when consumed.
         conn.execute("""
         CREATE TABLE IF NOT EXISTS enroll_codes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -76,8 +75,6 @@ def init_db() -> None:
         );
         """)
 
-        # Devices enrolled into the system.
-        # token_hash is the long-lived device credential (hashed).
         conn.execute("""
         CREATE TABLE IF NOT EXISTS devices (
             device_id TEXT PRIMARY KEY,
@@ -139,6 +136,18 @@ def init_db() -> None:
                          payload_json TEXT NOT NULL,
                          updated_at INTEGER NOT NULL
                      );
+                     """)
+                     
+        conn.execute("""
+                     CREATE TABLE IF NOT EXISTS broadcast_catalogue_behaviors (
+                         id INTEGER PRIMARY KEY AUTOINCREMENT,
+                         name TEXT NOT NULL,
+                         behavior_type TEXT NOT NULL,
+                         audience TEXT NOT NULL,
+                         entry_json TEXT NOT NULL,
+                         updated_at INTEGER NOT NULL,
+                         UNIQUE(name, behavior_type)
+                         );
                      """)
         
         _try_alter(conn, "ALTER TABLE devices ADD COLUMN tier TEXT NOT NULL DEFAULT 'free';")
@@ -686,10 +695,18 @@ def get_catalogue_manifest(tier: str) -> dict:
             WHERE audience IN ({placeholders})
             ORDER BY title COLLATE NOCASE
         """, audiences).fetchall()
+        
+        behavior_rows = conn.execute(f"""
+            SELECT name, behavior_type, updated_at
+            FROM broadcast_catalogue_behaviors
+            WHERE audience IN ({placeholders})
+            ORDER BY behavior_type, name COLLATE NOCASE
+        """, audiences).fetchall()
 
     return {
         "sessions": [{"title": r[0], "updated_at": r[1]} for r in session_rows],
         "blocks": [{"title": r[0], "updated_at": r[1]} for r in block_rows],
+        "behaviors": [{"name": r[0], "behavior_type": r[1], "updated_at": r[2]} for r in behavior_rows],
     }
 
 def get_catalogue_session_payload(title: str) -> dict | None:
@@ -800,6 +817,87 @@ async def push_or_queue_injection(*, device_id: str, payload: dict) -> None:
     # offline: queue it (replace enqueue_pending_delivery with your actual helper)
     queue_delivery(device_id=device_id, payload=payload)
     hub.log(device_id, "queued", detail=f"injection {payload.get('type')}", command_id=payload.get("id"))
+    
+def catalogue_upsert_behavior_entry(
+    name: str,
+    behavior_type: str,
+    audience: str,
+    entry: dict
+) -> None:
+    now = int(time.time())
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("""
+        INSERT INTO broadcast_catalogue_behaviors 
+            (name, behavior_type, audience, entry_json, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(name, behavior_type) DO UPDATE SET
+            audience=excluded.audience,
+            entry_json=excluded.entry_json,
+            updated_at=excluded.updated_at
+        """, (name, behavior_type, audience, _json_dumps(entry), now))
+        conn.commit()
+
+def catalogue_delete_behavior_entry(name: str, behavior_type: str) -> bool:
+    with sqlite3.connect(DB_PATH) as conn:
+        cur = conn.execute(
+            "DELETE FROM broadcast_catalogue_behaviors WHERE name = ? AND behavior_type = ?",
+            (name, behavior_type)
+        )
+        conn.commit()
+    return cur.rowcount == 1
+
+def catalogue_list_behavior_entries(
+    behavior_type: str | None = None,
+    tier: str = "free"
+) -> list[dict]:
+    audiences = ["all", "paid"] if tier == "paid" else ["all"]
+    placeholders = ",".join("?" * len(audiences))
+
+    if behavior_type:
+        with sqlite3.connect(DB_PATH) as conn:
+            rows = conn.execute(f"""
+                SELECT id, name, behavior_type, audience, updated_at
+                FROM broadcast_catalogue_behaviors
+                WHERE behavior_type = ? AND audience IN ({placeholders})
+                ORDER BY name COLLATE NOCASE
+            """, [behavior_type] + audiences).fetchall()
+    else:
+        with sqlite3.connect(DB_PATH) as conn:
+            rows = conn.execute(f"""
+                SELECT id, name, behavior_type, audience, updated_at
+                FROM broadcast_catalogue_behaviors
+                WHERE audience IN ({placeholders})
+                ORDER BY behavior_type, name COLLATE NOCASE
+            """, audiences).fetchall()
+
+    return [
+        {
+            "id": r[0],
+            "name": r[1],
+            "behavior_type": r[2],
+            "audience": r[3],
+            "updated_at": r[4],
+        }
+        for r in rows
+    ]
+
+def catalogue_get_behavior_entry(name: str, behavior_type: str) -> dict | None:
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            """SELECT name, behavior_type, audience, entry_json, updated_at 
+               FROM broadcast_catalogue_behaviors 
+               WHERE name = ? AND behavior_type = ?""",
+            (name, behavior_type)
+        ).fetchone()
+    if not row:
+        return None
+    return {
+        "name": row[0],
+        "behavior_type": row[1],
+        "audience": row[2],
+        "entry": _json_loads(row[3]) or {},
+        "updated_at": row[4],
+    }
 
 @admin_router.post("/enroll/create")
 def admin_create_enroll_code(ttl_minutes: int = 15):
@@ -1019,6 +1117,169 @@ async def admin_blocks_bulk_upload(
     if errors:
         msg += "\n\nErrors:\n" + "\n".join(errors[:50])
     return PlainTextResponse(msg)
+
+@admin_router.get("/behaviors/page", response_class=HTMLResponse)
+def behaviors_page(request: Request):
+    toys = catalogue_list_behavior_entries(behavior_type="toys_and_teases")
+    rules = catalogue_list_behavior_entries(behavior_type="rules_and_tasks")
+    web = catalogue_list_behavior_entries(behavior_type="web_aided_tasks")
+    return templates.TemplateResponse(
+        "behaviors.html",
+        {
+            "request": request,
+            "toys": toys,
+            "rules": rules,
+            "web": web,
+        }
+    )
+
+@admin_router.post("/behaviors/save/toys_and_teases")
+def save_toys_and_teases(
+    name: str = Form(...),
+    audience: str = Form("all"),
+    script: str = Form(...),
+    overwrite: str = Form("0"),
+):
+    name = name.strip()
+    if not name:
+        return PlainTextResponse("name is required", status_code=400)
+
+    audience = audience.strip().lower()
+    if audience not in ("all", "paid"):
+        return PlainTextResponse("audience must be all or paid", status_code=400)
+
+    overwrite_flag = overwrite.strip() in ("1", "true", "yes")
+    existing = catalogue_get_behavior_entry(name, "toys_and_teases")
+    if existing and not overwrite_flag:
+        return PlainTextResponse(
+            f"Entry '{name}' already exists. Re-submit with overwrite=1 to replace.",
+            status_code=409
+        )
+
+    # parse script using TheFactory delay extraction
+    text = normalize_newlines(script)
+    raw_lines = text.splitlines()
+    lines, delays = TheFactory.extract_delays(raw_lines)
+
+    messages = []
+    for line, delay in zip(lines, delays):
+        text_stripped = line.strip()
+        if not text_stripped:
+            continue
+        messages.append({
+            "text": text_stripped,
+            "delay_seconds": float(delay) if delay is not None else 5.0,
+        })
+
+    if not messages:
+        return PlainTextResponse("script produced no messages", status_code=400)
+
+    entry = {"messages": messages}
+    catalogue_upsert_behavior_entry(name, "toys_and_teases", audience, entry)
+    return PlainTextResponse(f"Saved toys_and_teases: {name}")
+
+@admin_router.post("/behaviors/save/rules_and_tasks")
+def save_rules_and_tasks(
+    name: str = Form(...),
+    audience: str = Form("all"),
+    task: str = Form(...),
+    check_text: str = Form(...),
+    timer_minutes: str = Form("5"),
+    reward: str = Form(...),
+    punishment: str = Form(...),
+    overwrite: str = Form("0"),
+):
+    name = name.strip()
+    if not name:
+        return PlainTextResponse("name is required", status_code=400)
+
+    audience = audience.strip().lower()
+    if audience not in ("all", "paid"):
+        return PlainTextResponse("audience must be all or paid", status_code=400)
+
+    overwrite_flag = overwrite.strip() in ("1", "true", "yes")
+    existing = catalogue_get_behavior_entry(name, "rules_and_tasks")
+    if existing and not overwrite_flag:
+        return PlainTextResponse(
+            f"Entry '{name}' already exists. Re-submit with overwrite=1 to replace.",
+            status_code=409
+        )
+
+    try:
+        timer_val = float(timer_minutes.strip())
+    except Exception:
+        return PlainTextResponse("timer_minutes must be a number", status_code=400)
+
+    entry = {
+        "task": task.strip(),
+        "check_text": check_text.strip(),
+        "timer_minutes": timer_val,
+        "reward": reward.strip(),
+        "punishment": punishment.strip(),
+    }
+
+    catalogue_upsert_behavior_entry(name, "rules_and_tasks", audience, entry)
+    return PlainTextResponse(f"Saved rules_and_tasks: {name}")
+
+@admin_router.post("/behaviors/save/web_aided_tasks")
+def save_web_aided_tasks(
+    name: str = Form(...),
+    audience: str = Form("all"),
+    url: str = Form(...),
+    message: str = Form(...),
+    overwrite: str = Form("0"),
+):
+    name = name.strip()
+    if not name:
+        return PlainTextResponse("name is required", status_code=400)
+
+    audience = audience.strip().lower()
+    if audience not in ("all", "paid"):
+        return PlainTextResponse("audience must be all or paid", status_code=400)
+
+    overwrite_flag = overwrite.strip() in ("1", "true", "yes")
+    existing = catalogue_get_behavior_entry(name, "web_aided_tasks")
+    if existing and not overwrite_flag:
+        return PlainTextResponse(
+            f"Entry '{name}' already exists. Re-submit with overwrite=1 to replace.",
+            status_code=409
+        )
+
+    url = url.strip()
+    if not url:
+        return PlainTextResponse("url is required", status_code=400)
+
+    entry = {
+        "url": url,
+        "message": message.strip(),
+    }
+
+    catalogue_upsert_behavior_entry(name, "web_aided_tasks", audience, entry)
+    return PlainTextResponse(f"Saved web_aided_tasks: {name}")
+
+@admin_router.post("/behaviors/delete")
+def delete_behavior_entry(
+    name: str = Form(...),
+    behavior_type: str = Form(...),
+):
+    name = name.strip()
+    behavior_type = behavior_type.strip()
+
+    if behavior_type not in ("toys_and_teases", "rules_and_tasks", "web_aided_tasks"):
+        return PlainTextResponse("invalid behavior_type", status_code=400)
+
+    deleted = catalogue_delete_behavior_entry(name, behavior_type)
+    if not deleted:
+        return PlainTextResponse(f"Entry not found: {name}", status_code=404)
+
+    return PlainTextResponse(f"Deleted {behavior_type}: {name}")
+
+@admin_router.get("/behaviors/load")
+def load_behavior_entry(name: str, behavior_type: str):
+    entry = catalogue_get_behavior_entry(name.strip(), behavior_type.strip())
+    if not entry:
+        return PlainTextResponse("not found", status_code=404)
+    return JSONResponse(entry)
 
 app.include_router(admin_router)
 
@@ -2116,6 +2377,7 @@ async def ws_endpoint(ws: WebSocket):
                 
                 want_sessions = [str(t) for t in (msg.get("want_sessions") or [])]
                 want_blocks = [str(t) for t in (msg.get("want_blocks") or [])]
+                want_behaviors = msg.get("want_behaviors") or []
                 
                 # send blocks first
                 for title in want_blocks:
@@ -2148,6 +2410,24 @@ async def ws_endpoint(ws: WebSocket):
                             if block_payload:
                                 await ws.send_text(json.dumps(block_payload))
                         await ws.send_text(json.dumps(payload))
+                        
+                for item in want_behaviors:
+                    name = str(item.get("name") or "").strip()
+                    behavior_type = str(item.get("behavior_type") or "").strip()
+                    if not name or not behavior_type:
+                        continue
+                    result = catalogue_get_behavior_entry(name, behavior_type)
+                    if result is None:
+                        continue
+                    if result["audience"] not in allowed_audiences:
+                        continue
+                    await ws.send_text(json.dumps({
+                        "type": "inject_behavior",
+                        "name": result["name"],
+                        "behavior_type": result["behavior_type"],
+                        "entry": result["entry"],
+                        "updated_at": result["updated_at"],
+                    }))
             elif mtype == "session_started":
                 estimated_s = float(msg.get("estimated_s") or 0)
                 started_at = float(msg.get("started_at") or time.time())

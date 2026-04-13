@@ -35,6 +35,9 @@ class TrayManager(QObject):
     image_save_dir_changed = Signal(object)      # payload: str | None
     browse_sessions_requested = Signal()
     session_receive_mode_changed = Signal(object)  # payload: str
+    behavior_settings_requested = Signal()
+    fire_next_drain = Signal()
+    fire_next_event = Signal()
 
     def __init__(
         self,
@@ -145,6 +148,25 @@ class TrayManager(QObject):
         self._premium_menu.addAction(act_customizer)
 
         self._act_customizer = act_customizer
+        
+        # existing customizer item already in premium menu
+        act_behaviors = QAction("Automated behaviors...", self._premium_menu)
+        act_behaviors.setEnabled(False)  # locked until paid
+        act_behaviors.triggered.connect(self.behavior_settings_requested.emit)
+        self._premium_menu.addAction(act_behaviors)
+        self._act_behaviors = act_behaviors
+        
+        self._fire_menu = menu.addMenu("Fire now")
+
+        act_fire_event = QAction("Tease me Mommy!", self._fire_menu)
+        act_fire_event.triggered.connect(self.fire_next_event.emit)
+        self._fire_menu.addAction(act_fire_event)
+        
+        act_fire_drain = QAction("Drain me Mommy!", self._fire_menu)
+        act_fire_drain.triggered.connect(self.fire_next_drain.emit)
+        self._fire_menu.addAction(act_fire_drain)
+
+        self._fire_menu.setEnabled(False)  # locked until paid
         
         menu.addSeparator()
         
@@ -402,3 +424,9 @@ class TrayManager(QObject):
 
         if hasattr(self, "_act_customizer"):
             self._act_customizer.setEnabled(paid)
+            
+        if hasattr(self, "_act_behaviors"):
+            self._act_behaviors.setEnabled(paid)
+        
+        if hasattr(self, "_fire_menu"):
+            self._fire_menu.setEnabled(paid)
