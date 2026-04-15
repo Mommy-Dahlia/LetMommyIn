@@ -6,6 +6,7 @@ import random
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+import logging
 
 import TheFactory 
 
@@ -129,6 +130,7 @@ class SessionCompiler:
 
         # 2) #PIC replacement (always use bundled images.csv if present)
         csv_path = self._find_first("images.csv")
+        logging.info("Session: looking for images.csv at %s", csv_path)
         if csv_path:
             images = TheFactory.load_images(str(csv_path))
             lines = TheFactory.assign_images(lines, images)

@@ -10,6 +10,7 @@ from PySide6.QtCore import QObject, QTimer, Qt
 from PySide6.QtWidgets import QDialog, QVBoxLayout, QLabel, QPushButton, QHBoxLayout
 
 from session_runner import _apply_pns
+from session_compiler import resource_path
 
 BEHAVIORS_VERSION = 1
 
@@ -133,6 +134,26 @@ def _generate_drain_sequence(url_pool: list[tuple[str, float]], max_usd: float) 
 def _autodrainer_interval_ms(behaviors: dict) -> int:
     return random.randint(30 * 60 * 1000, 60 * 60 * 1000)
 
+def load_drain_state(config_dir: Path) -> tuple[str, int, list[str]]:
+    path = config_dir / "drain_state.json"
+    if not path.exists():
+        return ("", 0, [])
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        return (
+            str(data.get("date", "")),
+            int(data.get("index", 0)),
+            list(data.get("sequence", [])),
+        )
+    except Exception:
+        return ("", 0, [])
+
+def save_drain_state(config_dir: Path, date: str, index: int, sequence: list[str]) -> None:
+    path = config_dir / "drain_state.json"
+    with path.open("w", encoding="utf-8") as f:
+        json.dump({"date": date, "index": index, "sequence": sequence}, f)
+
 class BehaviorSessionDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -205,6 +226,7 @@ class BehaviorManager(QObject):
         
     def start(self) -> None:
         self._behaviors = load_behaviors(self._config_dir)
+        self._drain_date, self._drain_index, self._drain_sequence = load_drain_state(self._config_dir)
         self._schedule_general()
         self._schedule_autodrainer()
      
@@ -257,6 +279,7 @@ class BehaviorManager(QObject):
             self._drain_sequence = _generate_drain_sequence(AUTODRAINER_URLS, max_usd)
             self._drain_index = 0
             self._drain_date = today
+            save_drain_state(self._config_dir, self._drain_date, self._drain_index, self._drain_sequence)
         
         if not self._drain_sequence:
             return
@@ -283,6 +306,9 @@ class BehaviorManager(QObject):
             "web_aided_tasks": load_content_pool(self._config_dir, "web_aided_tasks"),
         }
         
+        logging.info("Behavior pools: %s", {k: len(v) for k, v in pools.items()})
+        logging.info("Enabled: %s", enabled)
+        
         for name in ("toys_and_teases", "rules_and_tasks", "web_aided_tasks"):
             if enabled.get(name) and pools[name]:
                 candidates.append(name)
@@ -293,6 +319,7 @@ class BehaviorManager(QObject):
         if enabled.get("session") and self._behaviors.get("session", {}).get("allowed_sessions"):
             candidates.append("session")
             
+        logging.info("Candidates: %s", candidates)
         return candidates
     
     def _fire_general(self) -> None:
@@ -361,9 +388,14 @@ class BehaviorManager(QObject):
         bb_config = self._behaviors.get("bunny_bomb", {})
         audio_and_overlay = bool(bb_config.get("audio_and_overlay", False))
         
+        csv_path = resource_path("content/images.csv")
+            
+        logging.info("BunnyBomb: looking for images.csv at %s", csv_path)
+            
         try:
             import TheFactory
-            images = TheFactory.load_images(str(Path(__file__).parent / "images.csv"))
+            images = TheFactory.load_images(csv_path)
+            logging.info("BunnyBomb: loaded %d images", len(images))
         except Exception:
             logging.warning("BunnyBomb: failed to load images")
             return
@@ -430,6 +462,7 @@ class BehaviorManager(QObject):
         
         url = self._drain_sequence[self._drain_index]
         self._drain_index += 1
+        save_drain_state(self._config_dir, self._drain_date, self._drain_index, self._drain_sequence)
         self._dispatch_command({"type": "open_url", "body": url})
         
     def trigger_drain(self) -> None:

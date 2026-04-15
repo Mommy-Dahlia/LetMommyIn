@@ -32,6 +32,7 @@ class InjectionBatchNotifier(QObject):
 
         blocks = [e for e in self._events if e.kind == "block"]
         sessions = [e for e in self._events if e.kind == "session"]
+        behaviors = [e for e in self._events if e.kind == "behavior"]
 
         lines = []
         if sessions:
@@ -45,6 +46,8 @@ class InjectionBatchNotifier(QObject):
                 lines.append(f"  • {e.title}" + (" (overwrote)" if e.overwritten else ""))
             if len(blocks) > 40:
                 lines.append(f"  …and {len(blocks) - 40} more")
+        if behaviors:
+            lines.append("New automated behaviors received.")
 
         dlg = QDialog(None)
         dlg.setWindowTitle("Content received")

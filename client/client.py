@@ -37,12 +37,17 @@ from ui_settings import (
     set_image_save_enabled, set_image_save_dir, set_session_receive_mode
 )
 from session_compiler import SessionCompiler
-from session_customizer import SessionCustomizerDialog
 from session_launcher import SessionLauncherDialog
 from ui_theme import apply_app_theme
 from pyside_injection_summary import InjectionBatchNotifier, InjectEvent
 from behavior_manager import BehaviorManager, load_behaviors, save_behaviors
 from behavior_settings_dialog import BehaviorSettingsDialog
+from session_customizer import SessionCustomizerDialog
+
+import ssl
+import certifi
+os.environ['SSL_CERT_FILE'] = certifi.where()
+os.environ['REQUESTS_CA_BUNDLE'] = certifi.where()
 
 _injection_notifier = InjectionBatchNotifier(quiet_ms=800)
 
@@ -428,7 +433,7 @@ def write_injected_session(local_root: Path, *, title: str, summary: str, tags: 
     return stem
 
 def write_injected_behavior(local_root: Path, *, behavior_type: str, name: str, entry: dict) -> None:
-    out_dir = local_root / "content" / "behaviors"
+    out_dir = local_root / "behaviors"
     out_dir.mkdir(parents=True, exist_ok=True)
     pool_path = out_dir / f"{behavior_type}.json"
 
@@ -714,6 +719,11 @@ def start_global_pause_hotkey(on_toggle) -> None:
     on_toggle is called from the pynput thread (NOT Qt),
     so it should bounce work back to the Qt thread.
     """
+    
+    if sys.platform.startswith("linux"):
+        logging.info("Global hotkey disabled on Linux to prevent Qt conflicts")
+        return
+    
     global _HOTKEY_LISTENER
 
     pressed = set()

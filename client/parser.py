@@ -151,6 +151,13 @@ def parse_command(data):
                 raise RuntimeError("Injection handler not configured")
             _INJECTION_HANDLER(data)
             return
+        
+        case "inject_behavior":
+            if _INJECTION_HANDLER is None:
+                raise RuntimeError("Injection handler not configured")
+            _INJECTION_HANDLER(data)
+            return
+        
         case "show_message":
             title = data.get("title")
             body = data.get("body")
