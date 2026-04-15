@@ -19,7 +19,8 @@ import threading
 from PySide6.QtCore import QObject, Signal, QTimer
 from PySide6.QtWidgets import QApplication, QInputDialog, QMessageBox, QDialog
 from PySide6.QtGui import QIcon
-from pynput import keyboard
+if not sys.platform.startswith("linux"):
+    from pynput import keyboard
 
 from parser import parse_command, _apply_client_session_defaults, set_session_runner, set_audio_manager, set_subliminal_manager, set_wfm_manager, set_ack_queue, set_injection_handler
 from pyside_show_message import close_all_messages
