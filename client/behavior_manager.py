@@ -43,6 +43,8 @@ DEFAULT_BEHAVIORS = {
     "bunny_bomb": {
         "audio_and_overlay": False,
     },
+    "allowed_tags": [],\
+    "seen_tags": [],
 }
 
 def _merge_defaults(data: dict, defaults: dict) -> None:
@@ -224,6 +226,13 @@ class BehaviorManager(QObject):
         self._drain_index: int = 0
         self._drain_date: str = ""
         
+    def _entry_allowed(self, entry: dict) -> bool:
+        tags = set(entry.get("tags", []))
+        if not tags:
+            return False
+        allowed = set(self._behaviors.get("allowed_tags", []))
+        return tags.issubset(allowed)
+        
     def start(self) -> None:
         self._behaviors = load_behaviors(self._config_dir)
         self._drain_date, self._drain_index, self._drain_sequence = load_drain_state(self._config_dir)
@@ -328,9 +337,34 @@ class BehaviorManager(QObject):
             return
         choice = random.choice(candidates)
         getattr(self, f"_do_{choice}")()
+        
+    def _do_toys_and_teases(self) -> None:
+        pool = load_content_pool(self._config_dir, "toys_and_teases")
+        pool = [e for e in pool if self._entry_allowed(e)]
+        if not pool:
+            return
+        entry = random.choice(pool)
+        messages = entry.get("messages", [])
+
+        offset_ms = 0
+        for msg in messages:
+            text = str(msg.get("text", ""))
+            delay_s = float(msg.get("delay_seconds", 5))
+
+            QTimer.singleShot(
+                offset_ms,
+                lambda t=text, l=delay_s: self._dispatch_command({
+                    "type": "show_message",
+                    "title": "Let Mommy In",
+                    "body": t,
+                    "lifespan_s": l,
+                })
+            )
+            offset_ms += int(delay_s * 1000)
     
     def _do_rules_and_tasks(self) -> None:
         pool = load_content_pool(self._config_dir, "rules_and_tasks")
+        pool = [e for e in pool if self._entry_allowed(e)]
         if not pool:
             return
         entry = random.choice(pool)
@@ -368,6 +402,7 @@ class BehaviorManager(QObject):
     
     def _do_web_aided_tasks(self) -> None:
         pool = load_content_pool(self._config_dir, "web_aided_tasks")
+        pool = [e for e in pool if self._entry_allowed(e)]
         if not pool:
             return
         entry = random.choice(pool)

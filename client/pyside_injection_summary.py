@@ -47,7 +47,11 @@ class InjectionBatchNotifier(QObject):
             if len(blocks) > 40:
                 lines.append(f"  …and {len(blocks) - 40} more")
         if behaviors:
-            lines.append("New automated behaviors received.")
+            lines.append(f"Behavior content received: {len(behaviors)}")
+            for e in behaviors[:40]:
+                lines.append(f"  • {e.title}")
+            if len(behaviors) > 40:
+                lines.append(f"  …and {len(behaviors) - 40} more")
 
         dlg = QDialog(None)
         dlg.setWindowTitle("Content received")

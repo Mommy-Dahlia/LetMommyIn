@@ -41,7 +41,7 @@ from session_compiler import SessionCompiler
 from session_launcher import SessionLauncherDialog
 from ui_theme import apply_app_theme
 from pyside_injection_summary import InjectionBatchNotifier, InjectEvent
-from behavior_manager import BehaviorManager, load_behaviors, save_behaviors
+from behavior_manager import BehaviorManager, load_behaviors, save_behaviors, load_content_pool
 from behavior_settings_dialog import BehaviorSettingsDialog
 from session_customizer import SessionCustomizerDialog
 
@@ -65,6 +65,30 @@ async def _send_to_server(payload: dict) -> None:
             await ws.send(json.dumps(payload))
         except Exception:
             pass
+        
+def _install_linux(binary_src: Path) -> None:
+    import shutil
+    import stat
+
+    # prefer ~/.local/bin, fall back to /usr/local/bin if writable
+    local_bin = Path.home() / ".local" / "bin"
+    local_bin.mkdir(parents=True, exist_ok=True)
+
+    dest = local_bin / "lmi"
+
+    # copy binary to destination
+    shutil.copy2(binary_src, dest)
+    
+    # make it executable
+    dest.chmod(dest.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+    # create symlink for settings
+    settings_link = local_bin / "lmi-settings"
+    if settings_link.exists() or settings_link.is_symlink():
+        settings_link.unlink()
+    settings_link.symlink_to(dest)
+
+    logging.info("Installed to %s", dest)
 
 def get_content_roots(config_dir: Path) -> list[Path]:
     """
@@ -333,6 +357,11 @@ def parse_args():
         help="Override server WebSocket URL (e.g. ws://127.0.0.1:8000/ws or wss://example.com/ws)",
         type=str,
     )
+    parser.add_argument(
+        "--settings",
+        action="store_true",
+        help="Open settings window only"
+    )
     return parser.parse_args()
 
 async def send_ack(ws, command_id: str, status: str, detail: str = "") -> None:
@@ -433,12 +462,14 @@ def write_injected_session(local_root: Path, *, title: str, summary: str, tags: 
     (sessions_dir / f"{stem}.meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
     return stem
 
-def write_injected_behavior(local_root: Path, *, behavior_type: str, name: str, entry: dict) -> None:
-    out_dir = local_root / "behaviors"
+def write_injected_behavior(local_root: Path, *, behavior_type: str, name: str, entry: dict) -> tuple[list[str], list[str]]:
+    """
+    Returns (all_tags_in_pool, new_tags_not_previously_seen)
+    """
+    out_dir = local_root / "content" / "behaviors"
     out_dir.mkdir(parents=True, exist_ok=True)
     pool_path = out_dir / f"{behavior_type}.json"
 
-    # load existing pool
     if pool_path.exists():
         try:
             with pool_path.open("r", encoding="utf-8") as f:
@@ -448,7 +479,13 @@ def write_injected_behavior(local_root: Path, *, behavior_type: str, name: str, 
     else:
         pool = []
 
-    # find and replace existing entry with same name, or append
+    # collect all tags already seen in this pool
+    seen_tags: set[str] = set()
+    for e in pool:
+        for tag in e.get("tags", []):
+            seen_tags.add(tag)
+
+    # find and replace or append
     entry_with_name = dict(entry)
     entry_with_name["_name"] = name
 
@@ -462,6 +499,12 @@ def write_injected_behavior(local_root: Path, *, behavior_type: str, name: str, 
 
     with pool_path.open("w", encoding="utf-8") as f:
         json.dump(pool, f, indent=2, ensure_ascii=False)
+
+    # determine which incoming tags are new
+    incoming_tags = set(entry.get("tags", []))
+    new_tags = list(incoming_tags - seen_tags)
+
+    return list(incoming_tags), new_tags
 
 def prompt_username() -> str:
     while True:
@@ -778,6 +821,34 @@ def main() -> None:
     apply_app_theme(app)
     app.setQuitOnLastWindowClosed(False)
     
+    args = parse_args()
+
+    # Linux install
+    if sys.platform.startswith("linux") and hasattr(sys, "_MEIPASS"):
+        binary_src = Path(sys.executable).resolve()
+        dest = Path.home() / ".local" / "bin" / "lmi"
+        if binary_src != dest:
+            try:
+                _install_linux(binary_src)
+            except Exception as e:
+                logging.warning("Could not install to ~/.local/bin: %s", repr(e))
+
+    # Settings-only mode
+    if args.settings:
+        cfg = load_config()
+        if cfg is None:
+            cfg = first_run_setup()
+        content_roots = get_content_roots(CONFIG_DIR)
+        compiler = SessionCompiler(roots=content_roots)
+        from behavior_settings_dialog import BehaviorSettingsDialog
+        dlg = BehaviorSettingsDialog(
+            config_dir=CONFIG_DIR,
+            content_roots=content_roots,
+            compiler=compiler,
+        )
+        dlg.exec()
+        sys.exit(0)
+    
     cfg = load_config()
     if cfg is None:
         cfg = first_run_setup()
@@ -822,14 +893,36 @@ def main() -> None:
             name = str(cmd.get("name") or "")
             entry = cmd.get("entry") or {}
             updated_at = cmd.get("updated_at") or int(time.time())
+            incoming_tags = list(cmd.get("tags") or [])
             
             if behavior_type not in ("toys_and_teases", "rules_and_tasks", "web_aided_tasks"):
                 logging.warning("Unknown behavior_type in inject_behavior: %s", behavior_type)
                 return
 
-            write_injected_behavior(local_root, behavior_type=behavior_type, name=name, entry=entry)
+            all_tags, new_tags = write_injected_behavior(
+                local_root,
+                behavior_type=behavior_type,
+                name=name,
+                entry=entry
+            )
+            
             update_behavior_manifest_entry(behavior_type, name, updated_at)
-            _injection_notifier.add(InjectEvent(kind="behavior", title=f"{behavior_type}: {name}"))
+            
+            # persist new tags to seen_tags in behaviors.json
+            if new_tags:
+                behaviors = load_behaviors(CONFIG_DIR)
+                seen = behaviors.get("seen_tags", [])
+                for tag in new_tags:
+                    if tag not in seen:
+                        seen.append(tag)
+                behaviors["seen_tags"] = seen
+                save_behaviors(CONFIG_DIR, behaviors)
+            
+            tag_note = f" [new tags: {', '.join(new_tags)}]" if new_tags else ""
+            _injection_notifier.add(InjectEvent(
+                kind="behavior",
+                title=f"{behavior_type}: {name}{tag_note}"
+            ))
             return
 
     set_injection_handler(_handle_injection)
@@ -862,7 +955,6 @@ def main() -> None:
     set_popup_sfx_path(cfg.popup_sfx_path)
     set_session_receive_mode(getattr(cfg, "session_receive_mode", "full"))
     
-    args = parse_args()
     if args.server:
         parsed = urlparse(args.server.strip())
         if parsed.query:

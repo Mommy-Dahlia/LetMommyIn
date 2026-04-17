@@ -145,12 +145,14 @@ def init_db() -> None:
                          behavior_type TEXT NOT NULL,
                          audience TEXT NOT NULL,
                          entry_json TEXT NOT NULL,
+                         tags_json TEXT NOT NULL DEFAULT '[]',
                          updated_at INTEGER NOT NULL,
                          UNIQUE(name, behavior_type)
                          );
                      """)
         
         _try_alter(conn, "ALTER TABLE devices ADD COLUMN tier TEXT NOT NULL DEFAULT 'free';")
+        _try_alter(conn, "ALTER TABLE broadcast_catalogue_behaviors ADD COLUMN tags_json TEXT NOT NULL DEFAULT '[]';")
 
         conn.commit()
 
@@ -697,7 +699,7 @@ def get_catalogue_manifest(tier: str) -> dict:
         """, audiences).fetchall()
         
         behavior_rows = conn.execute(f"""
-            SELECT name, behavior_type, updated_at
+            SELECT name, behavior_type, updated_at, tags_json
             FROM broadcast_catalogue_behaviors
             WHERE audience IN ({placeholders})
             ORDER BY behavior_type, name COLLATE NOCASE
@@ -706,7 +708,7 @@ def get_catalogue_manifest(tier: str) -> dict:
     return {
         "sessions": [{"title": r[0], "updated_at": r[1]} for r in session_rows],
         "blocks": [{"title": r[0], "updated_at": r[1]} for r in block_rows],
-        "behaviors": [{"name": r[0], "behavior_type": r[1], "updated_at": r[2]} for r in behavior_rows],
+        "behaviors": [{"name": r[0], "behavior_type": r[1], "updated_at": r[2], "tags": _json_loads(r[3]) or []} for r in behavior_rows],
     }
 
 def get_catalogue_session_payload(title: str) -> dict | None:
@@ -825,16 +827,18 @@ def catalogue_upsert_behavior_entry(
     entry: dict
 ) -> None:
     now = int(time.time())
+    tags = entry.get("tags", [])
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute("""
         INSERT INTO broadcast_catalogue_behaviors 
-            (name, behavior_type, audience, entry_json, updated_at)
+            (name, behavior_type, audience, entry_json, tags_json, updated_at)
         VALUES (?, ?, ?, ?, ?)
         ON CONFLICT(name, behavior_type) DO UPDATE SET
             audience=excluded.audience,
             entry_json=excluded.entry_json,
+            tags_json=excluded.tags_json,
             updated_at=excluded.updated_at
-        """, (name, behavior_type, audience, _json_dumps(entry), now))
+        """, (name, behavior_type, audience, _json_dumps(entry), _json_dumps(tags), now))
         conn.commit()
 
 def catalogue_delete_behavior_entry(name: str, behavior_type: str) -> bool:
@@ -856,7 +860,7 @@ def catalogue_list_behavior_entries(
     if behavior_type:
         with sqlite3.connect(DB_PATH) as conn:
             rows = conn.execute(f"""
-                SELECT id, name, behavior_type, audience, updated_at
+                SELECT id, name, behavior_type, audience, updated_at, tags_json
                 FROM broadcast_catalogue_behaviors
                 WHERE behavior_type = ? AND audience IN ({placeholders})
                 ORDER BY name COLLATE NOCASE
@@ -864,7 +868,7 @@ def catalogue_list_behavior_entries(
     else:
         with sqlite3.connect(DB_PATH) as conn:
             rows = conn.execute(f"""
-                SELECT id, name, behavior_type, audience, updated_at
+                SELECT id, name, behavior_type, audience, updated_at, tags_json
                 FROM broadcast_catalogue_behaviors
                 WHERE audience IN ({placeholders})
                 ORDER BY behavior_type, name COLLATE NOCASE
@@ -877,6 +881,7 @@ def catalogue_list_behavior_entries(
             "behavior_type": r[2],
             "audience": r[3],
             "updated_at": r[4],
+            "tags": _json_loads(r[5]) or [],
         }
         for r in rows
     ]
@@ -884,7 +889,7 @@ def catalogue_list_behavior_entries(
 def catalogue_get_behavior_entry(name: str, behavior_type: str) -> dict | None:
     with sqlite3.connect(DB_PATH) as conn:
         row = conn.execute(
-            """SELECT name, behavior_type, audience, entry_json, updated_at 
+            """SELECT name, behavior_type, audience, entry_json, tags_json, updated_at 
                FROM broadcast_catalogue_behaviors 
                WHERE name = ? AND behavior_type = ?""",
             (name, behavior_type)
@@ -896,7 +901,8 @@ def catalogue_get_behavior_entry(name: str, behavior_type: str) -> dict | None:
         "behavior_type": row[1],
         "audience": row[2],
         "entry": _json_loads(row[3]) or {},
-        "updated_at": row[4],
+        "tags": _json_loads(row[4]) or [],
+        "updated_at": row[5],
     }
 
 @admin_router.post("/enroll/create")
@@ -1138,6 +1144,7 @@ def save_toys_and_teases(
     name: str = Form(...),
     audience: str = Form("all"),
     script: str = Form(...),
+    tags: str = Form(""),
     overwrite: str = Form("0"),
 ):
     name = name.strip()
@@ -1174,7 +1181,8 @@ def save_toys_and_teases(
     if not messages:
         return PlainTextResponse("script produced no messages", status_code=400)
 
-    entry = {"messages": messages}
+    tag_list = normalize_tags_csv(tags)
+    entry = {"messages": messages, "tags": tag_list}
     catalogue_upsert_behavior_entry(name, "toys_and_teases", audience, entry)
     return PlainTextResponse(f"Saved toys_and_teases: {name}")
 
@@ -1187,6 +1195,7 @@ def save_rules_and_tasks(
     timer_minutes: str = Form("5"),
     reward: str = Form(...),
     punishment: str = Form(...),
+    tags: str = Form(""),
     overwrite: str = Form("0"),
 ):
     name = name.strip()
@@ -1210,12 +1219,14 @@ def save_rules_and_tasks(
     except Exception:
         return PlainTextResponse("timer_minutes must be a number", status_code=400)
 
+    tag_list = normalize_tags_csv(tags)
     entry = {
         "task": task.strip(),
         "check_text": check_text.strip(),
         "timer_minutes": timer_val,
         "reward": reward.strip(),
         "punishment": punishment.strip(),
+        "tags": tag_list,
     }
 
     catalogue_upsert_behavior_entry(name, "rules_and_tasks", audience, entry)
@@ -1227,6 +1238,7 @@ def save_web_aided_tasks(
     audience: str = Form("all"),
     url: str = Form(...),
     message: str = Form(...),
+    tags: str = Form(""),
     overwrite: str = Form("0"),
 ):
     name = name.strip()
@@ -1249,9 +1261,11 @@ def save_web_aided_tasks(
     if not url:
         return PlainTextResponse("url is required", status_code=400)
 
+    tag_list = normalize_tags_csv(tags)
     entry = {
         "url": url,
         "message": message.strip(),
+        "tags": tag_list
     }
 
     catalogue_upsert_behavior_entry(name, "web_aided_tasks", audience, entry)
@@ -2426,6 +2440,7 @@ async def ws_endpoint(ws: WebSocket):
                         "name": result["name"],
                         "behavior_type": result["behavior_type"],
                         "entry": result["entry"],
+                        "tags": result["entry"].get("tags", []),
                         "updated_at": result["updated_at"],
                     }))
             elif mtype == "session_started":

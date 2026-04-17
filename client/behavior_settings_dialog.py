@@ -3,10 +3,62 @@ from pathlib import Path
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QGroupBox, QFormLayout, QCheckBox, QDoubleSpinBox,
-    QSpinBox, QListWidget, QAbstractItemView, QScrollArea, QWidget
+    QGroupBox, QFormLayout, QCheckBox,
+    QListWidget, QAbstractItemView, QScrollArea, QWidget
 )
-from behavior_manager import load_behaviors, save_behaviors
+from behavior_manager import load_behaviors, save_behaviors, load_content_pool
+
+class StepSpinBox(QWidget):
+    valueChanged = Signal(float)
+
+    def __init__(self, *, min_val: float, max_val: float, step: float = 1.0, 
+                 decimals: int = 0, prefix: str = "", suffix: str = "", parent=None):
+        super().__init__(parent)
+        self._min = min_val
+        self._max = max_val
+        self._step = step
+        self._decimals = decimals
+        self._prefix = prefix
+        self._suffix = suffix
+        self._value = min_val
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(2)
+
+        self._btn_down = QPushButton("▼")
+        self._btn_down.setFixedWidth(28)
+        self._btn_down.clicked.connect(self._decrement)
+
+        self._label = QLabel(self._fmt())
+        self._label.setAlignment(Qt.AlignCenter)
+        self._label.setMinimumWidth(60)
+
+        self._btn_up = QPushButton("▲")
+        self._btn_up.setFixedWidth(28)
+        self._btn_up.clicked.connect(self._increment)
+
+        layout.addWidget(self._btn_down)
+        layout.addWidget(self._label)
+        layout.addWidget(self._btn_up)
+
+    def _fmt(self) -> str:
+        val = f"{self._value:.{self._decimals}f}"
+        return f"{self._prefix}{val}{self._suffix}"
+
+    def _decrement(self) -> None:
+        self.setValue(self._value - self._step)
+
+    def _increment(self) -> None:
+        self.setValue(self._value + self._step)
+
+    def value(self) -> float:
+        return self._value
+
+    def setValue(self, v: float) -> None:
+        self._value = max(self._min, min(self._max, round(v, self._decimals)))
+        self._label.setText(self._fmt())
+        self.valueChanged.emit(self._value)
 
 class BehaviorSettingsDialog(QDialog):
     behaviors_changed = Signal(dict)
@@ -34,22 +86,27 @@ class BehaviorSettingsDialog(QDialog):
         time_group = QGroupBox("Active Time")
         time_form = QFormLayout(time_group)
 
-        self._start_h = QSpinBox()
-        self._start_h.setRange(0, 23)
+        self._start_h = StepSpinBox(min_val=0, max_val=23,
+                                    suffix="h",
+                                    parent=self)
         self._start_h.setValue(self._behaviors["active_time"]["start_h"])
 
-        self._start_m = QSpinBox()
-        self._start_m.setRange(0, 59)
+        self._start_m = StepSpinBox(min_val=0, max_val=59,
+                                    suffix="m",
+                                    parent=self)
         self._start_m.setValue(self._behaviors["active_time"]["start_m"])
-
-        self._end_h = QSpinBox()
-        self._end_h.setRange(0, 23)
+        
+        self._end_h = StepSpinBox(min_val=0, max_val=23,
+                                    suffix="h",
+                                    parent=self)
         self._end_h.setValue(self._behaviors["active_time"]["end_h"])
-
-        self._end_m = QSpinBox()
-        self._end_m.setRange(0, 59)
+        
+        self._end_m = StepSpinBox(min_val=0, max_val=59,
+                                    suffix="m",
+                                    parent=self)
         self._end_m.setValue(self._behaviors["active_time"]["end_m"])
-
+        
+        
         start_row = QHBoxLayout()
         start_row.addWidget(QLabel("Hour:"))
         start_row.addWidget(self._start_h)
@@ -69,20 +126,16 @@ class BehaviorSettingsDialog(QDialog):
         freq_group = QGroupBox("General Frequency")
         freq_form = QFormLayout(freq_group)
 
-        self._min_minutes = QSpinBox()
-        self._min_minutes.setRange(1, 1440)
-        self._min_minutes.setValue(
-            int(self._behaviors["general_frequency"]["min_minutes"])
-        )
-        self._min_minutes.setSuffix(" min")
+        self._min_minutes = StepSpinBox(min_val=0, max_val=1440,
+                                    suffix="m",
+                                    parent=self)
+        self._min_minutes.setValue(self._behaviors["general_frequency"]["min_minutes"])
 
-        self._random_minutes = QSpinBox()
-        self._random_minutes.setRange(0, 1440)
-        self._random_minutes.setValue(
-            int(self._behaviors["general_frequency"]["random_minutes"])
-        )
-        self._random_minutes.setSuffix(" min")
-
+        self._random_minutes = StepSpinBox(min_val=0, max_val=1440,
+                                    suffix="m",
+                                    parent=self)
+        self._random_minutes.setValue(self._behaviors["general_frequency"]["random_minutes"])
+        
         freq_form.addRow("Minimum between events:", self._min_minutes)
         freq_form.addRow("Additional random time:", self._random_minutes)
         root.addWidget(freq_group)
@@ -133,11 +186,15 @@ class BehaviorSettingsDialog(QDialog):
         drain_row = QHBoxLayout()
         self._chk_autodrainer = QCheckBox("Autodrainer")
         self._chk_autodrainer.setChecked(bool(enabled.get("autodrainer")))
-        self._max_usd = QDoubleSpinBox()
-        self._max_usd.setRange(0.0, 10000.0)
-        self._max_usd.setDecimals(2)
-        self._max_usd.setPrefix("$")
-        self._max_usd.setSuffix(" / day")
+        self._max_usd = StepSpinBox(
+            min_val=0.0,
+            max_val=10000.0,
+            step=0.50,
+            decimals=2,
+            prefix="$",
+            suffix=" / day",
+            parent=self
+        )
         self._max_usd.setValue(
             float(self._behaviors["autodrainer"]["max_per_day_usd"])
         )
@@ -162,6 +219,36 @@ class BehaviorSettingsDialog(QDialog):
 
         root.addWidget(enable_group)
         
+        tags_group = QGroupBox("Allowed Content Tags")
+        tags_layout = QVBoxLayout(tags_group)
+        tags_layout.addWidget(QLabel(
+            "Only behavior content with at least one allowed tag will fire."
+        ))
+        
+        self._tag_checks: dict[str, QCheckBox] = {}
+        allowed = set(self._behaviors.get("allowed_tags", []))
+        
+        known_tags: set[str] = set(self._behaviors.get("seen_tags", []))
+        
+        tag_scroll = QScrollArea()
+        tag_scroll.setWidgetResizable(True)
+        tag_inner = QWidget()
+        tag_inner_layout = QVBoxLayout(tag_inner)
+        
+        if known_tags:
+            for tag in sorted(known_tags):
+                chk = QCheckBox(tag)
+                chk.setChecked(tag in allowed)
+                tag_inner_layout.addWidget(chk)
+                self._tag_checks[tag] = chk
+        else:
+            tag_inner_layout.addWidget(QLabel("No behavior content received yet."))
+        
+        tag_scroll.setWidget(tag_inner)
+        tag_scroll.setMinimumHeight(150)
+        tags_layout.addWidget(tag_scroll)
+        root.addWidget(tags_group)
+        
         btn_row = QHBoxLayout()
         btn_save = QPushButton("Save")
         btn_cancel = QPushButton("Cancel")
@@ -172,13 +259,13 @@ class BehaviorSettingsDialog(QDialog):
         outer.addLayout(btn_row)
         
     def _save(self) -> None:
-        self._behaviors["active_time"]["start_h"] = self._start_h.value()
-        self._behaviors["active_time"]["start_m"] = self._start_m.value()
-        self._behaviors["active_time"]["end_h"] = self._end_h.value()
-        self._behaviors["active_time"]["end_m"] = self._end_m.value()
+        self._behaviors["active_time"]["start_h"] = int(self._start_h.value())
+        self._behaviors["active_time"]["start_m"] = int(self._start_m.value())
+        self._behaviors["active_time"]["end_h"] = int(self._end_h.value())
+        self._behaviors["active_time"]["end_m"] = int(self._end_m.value())
 
-        self._behaviors["general_frequency"]["min_minutes"] = self._min_minutes.value()
-        self._behaviors["general_frequency"]["random_minutes"] = self._random_minutes.value()
+        self._behaviors["general_frequency"]["min_minutes"] = int(self._min_minutes.value())
+        self._behaviors["general_frequency"]["random_minutes"] = int(self._random_minutes.value())
 
         self._behaviors["enabled"]["toys_and_teases"] = self._chk_toys.isChecked()
         self._behaviors["enabled"]["rules_and_tasks"] = self._chk_rules.isChecked()
@@ -189,6 +276,11 @@ class BehaviorSettingsDialog(QDialog):
 
         self._behaviors["bunny_bomb"]["audio_and_overlay"] = self._chk_bunny_audio.isChecked()
         self._behaviors["autodrainer"]["max_per_day_usd"] = self._max_usd.value()
+        
+        self._behaviors["allowed_tags"] = [
+            tag for tag, chk in self._tag_checks.items()
+            if chk.isChecked()
+        ]
 
         save_behaviors(self._config_dir, self._behaviors)
         self.behaviors_changed.emit(self._behaviors)
