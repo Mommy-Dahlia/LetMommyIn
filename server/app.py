@@ -832,7 +832,7 @@ def catalogue_upsert_behavior_entry(
         conn.execute("""
         INSERT INTO broadcast_catalogue_behaviors 
             (name, behavior_type, audience, entry_json, tags_json, updated_at)
-        VALUES (?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?)
         ON CONFLICT(name, behavior_type) DO UPDATE SET
             audience=excluded.audience,
             entry_json=excluded.entry_json,
