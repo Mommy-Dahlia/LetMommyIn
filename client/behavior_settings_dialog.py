@@ -6,7 +6,7 @@ from PySide6.QtWidgets import (
     QGroupBox, QFormLayout, QCheckBox,
     QListWidget, QAbstractItemView, QScrollArea, QWidget
 )
-from behavior_manager import load_behaviors, save_behaviors, load_content_pool
+from behavior_manager import load_behaviors, save_behaviors
 
 class StepSpinBox(QWidget):
     valueChanged = Signal(float)

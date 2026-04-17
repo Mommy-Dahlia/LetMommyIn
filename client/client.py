@@ -466,7 +466,7 @@ def write_injected_behavior(local_root: Path, *, behavior_type: str, name: str, 
     """
     Returns (all_tags_in_pool, new_tags_not_previously_seen)
     """
-    out_dir = local_root / "content" / "behaviors"
+    out_dir = local_root / "behaviors"
     out_dir.mkdir(parents=True, exist_ok=True)
     pool_path = out_dir / f"{behavior_type}.json"
 
@@ -840,7 +840,6 @@ def main() -> None:
             cfg = first_run_setup()
         content_roots = get_content_roots(CONFIG_DIR)
         compiler = SessionCompiler(roots=content_roots)
-        from behavior_settings_dialog import BehaviorSettingsDialog
         dlg = BehaviorSettingsDialog(
             config_dir=CONFIG_DIR,
             content_roots=content_roots,
@@ -917,12 +916,10 @@ def main() -> None:
                         seen.append(tag)
                 behaviors["seen_tags"] = seen
                 save_behaviors(CONFIG_DIR, behaviors)
-            
-            tag_note = f" [new tags: {', '.join(new_tags)}]" if new_tags else ""
-            _injection_notifier.add(InjectEvent(
-                kind="behavior",
-                title=f"{behavior_type}: {name}{tag_note}"
-            ))
+                _injection_notifier.add(InjectEvent(
+                    kind="behavior",
+                    title=f"New tags: {', '.join(new_tags)}"
+                ))
             return
 
     set_injection_handler(_handle_injection)
@@ -1211,14 +1208,18 @@ def main() -> None:
         if getattr(cfg, "tier", "free") != "paid":
             QMessageBox.information(None, "Locked", "Automated behaviors are a paid feature.")
             return
-        dlg = BehaviorSettingsDialog(
-            config_dir=CONFIG_DIR,
-            content_roots=content_roots,
-            compiler=compiler,
-            parent=None,
-        )
-        dlg.behaviors_changed.connect(behavior_manager.update_behaviors)
-        dlg.exec()
+        try:
+            dlg = BehaviorSettingsDialog(
+                config_dir=CONFIG_DIR,
+                content_roots=content_roots,
+                compiler=compiler,
+                parent=None,
+            )
+            dlg.behaviors_changed.connect(behavior_manager.update_behaviors)
+            dlg.exec()
+        except Exception as e:
+            logging.exception("Failed to open behavior settings")
+            QMessageBox.critical(None, "Error", str(e))
             
     def on_session_receive_mode_changed(mode: str) -> None:
         mode = (mode or "").strip().lower()
