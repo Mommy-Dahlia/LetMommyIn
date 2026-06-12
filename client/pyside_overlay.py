@@ -30,12 +30,12 @@ if sys.platform.startswith("win"):
     SetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_long]
     SetWindowLongW.restype = ctypes.c_long
 
-    def _make_click_through(hwnd: int) -> None:
+    def make_click_through(hwnd: int) -> None:
         ex = GetWindowLongW(hwnd, GWL_EXSTYLE)
         ex |= WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE
         SetWindowLongW(hwnd, GWL_EXSTYLE, ex)
 else:
-    def _make_click_through(hwnd: int) -> None:
+    def make_click_through(hwnd: int) -> None:
         return
 
 _ACTIVE_OVERLAYS: list["GifOverlay"] = []
@@ -172,5 +172,5 @@ def show_gif_overlay(url: str, *, screen: int = -1, opacity: float = 1.0) -> Non
 
         dlg.destroyed.connect(_forget)
         dlg.show()
-        _make_click_through(int(dlg.winId()))
+        make_click_through(int(dlg.winId()))
         dlg.raise_()

@@ -5,8 +5,9 @@ import os
 from datetime import datetime, timezone
 from dataclasses import dataclass
 from typing import Callable, Optional
+import sys
 
-from PySide6.QtCore import QObject, Signal, QTimer
+from PySide6.QtCore import QObject, Signal, QTimer, Qt
 from PySide6.QtGui import QIcon, QAction
 from PySide6.QtWidgets import QMenu, QSystemTrayIcon, QApplication, QInputDialog, QFileDialog
 
@@ -33,11 +34,19 @@ class TrayManager(QObject):
     popup_sfx_changed = Signal(object)  # payload: str | None
     image_save_enabled_changed = Signal(object)  # payload: bool
     image_save_dir_changed = Signal(object)      # payload: str | None
+    wallpaper_set_cmd_changed = Signal(object)   # payload: str | None
+    wallpaper_get_cmd_changed = Signal(object)
     browse_sessions_requested = Signal()
     session_receive_mode_changed = Signal(object)  # payload: str
     behavior_settings_requested = Signal()
+    restore_wallpaper = Signal()
     fire_next_drain = Signal()
     fire_next_event = Signal()
+    profile_selected = Signal(object)
+    schedule_toggled = Signal(object)
+    image_popup_opacity_changed = Signal(object)
+    image_click_through_changed = Signal(object)
+    clear_screen = Signal()
 
     def __init__(
         self,
@@ -72,6 +81,8 @@ class TrayManager(QObject):
         self._set_selected_screens = set_selected_screens
         self._get_selected_audio = get_selected_audio
         self._set_selected_audio = set_selected_audio
+        self._current_profile: str | None = None
+        self._known_profiles: list[str] = []
 
         self.tray = QSystemTrayIcon(self._icon_offline, QApplication.instance())
         self.tray.setToolTip("Let Mommy In")
@@ -85,6 +96,16 @@ class TrayManager(QObject):
         act_browse_sessions = QAction("Browse Sessions...", menu)
         act_browse_sessions.triggered.connect(self.browse_sessions_requested.emit)
         menu.addAction(act_browse_sessions)
+        menu.addSeparator()
+        
+        act_behaviors = QAction("Automated behaviors...", menu)
+        act_behaviors.triggered.connect(self.behavior_settings_requested.emit)
+        menu.addAction(act_behaviors)
+
+        act_fire_event = QAction("Tease me Mommy!", menu)
+        act_fire_event.triggered.connect(self.fire_next_event.emit)
+        menu.addAction(act_fire_event)
+
         menu.addSeparator()
 
         # Screens submenu
@@ -119,6 +140,21 @@ class TrayManager(QObject):
         act_screen.triggered.connect(self._prompt_overlay_screen)
         self._defaults_menu.addAction(act_screen)
         
+        act_identify = QAction("Identify monitors", menu)
+        act_identify.triggered.connect(self._show_monitor_ids)
+        menu.addAction(act_identify)
+        
+        act_img_opacity = QAction("Set image popup opacity...", self._defaults_menu)
+        act_img_opacity.triggered.connect(self._prompt_image_popup_opacity)
+        self._defaults_menu.addAction(act_img_opacity)
+        
+        act_click_through = QAction("Click-through image popups", self._defaults_menu)
+        act_click_through.setCheckable(True)
+        act_click_through.setChecked(False)
+        act_click_through.triggered.connect(lambda checked: self.image_click_through_changed.emit(bool(checked)))
+        self._defaults_menu.addAction(act_click_through)
+        self._act_click_through = act_click_through
+        
         act_sfx = QAction("Set popup sound (local path)...", self._defaults_menu)
         act_sfx.triggered.connect(self._prompt_popup_sfx)
         self._defaults_menu.addAction(act_sfx)
@@ -138,6 +174,15 @@ class TrayManager(QObject):
         self._session_receive_menu = self._defaults_menu.addMenu("Incoming sessions")
         self._rebuild_session_receive_menu()
         
+        if not sys.platform.startswith("win"):
+            act_wp_set = QAction("Set wallpaper command (Linux)...", self._defaults_menu)
+            act_wp_set.triggered.connect(self._prompt_wallpaper_set_cmd)
+            self._defaults_menu.addAction(act_wp_set)
+            
+            act_wp_get = QAction("Set wallpaper get command (Linux)...", self._defaults_menu)
+            act_wp_get.triggered.connect(self._prompt_wallpaper_get_cmd)
+            self._defaults_menu.addAction(act_wp_get)
+        
         menu.addSeparator()
 
         self._premium_menu = menu.addMenu("Premium")
@@ -149,30 +194,35 @@ class TrayManager(QObject):
 
         self._act_customizer = act_customizer
         
-        # existing customizer item already in premium menu
-        act_behaviors = QAction("Automated behaviors...", self._premium_menu)
-        act_behaviors.setEnabled(False)  # locked until paid
-        act_behaviors.triggered.connect(self.behavior_settings_requested.emit)
-        self._premium_menu.addAction(act_behaviors)
-        self._act_behaviors = act_behaviors
-        
-        self._fire_menu = menu.addMenu("Fire now")
+        self._profile_menu = self._premium_menu.addMenu("Active profile")
+        self._rebuild_profile_menu()
 
-        act_fire_event = QAction("Tease me Mommy!", self._fire_menu)
-        act_fire_event.triggered.connect(self.fire_next_event.emit)
-        self._fire_menu.addAction(act_fire_event)
+        act_schedule_toggle = QAction("Schedule enabled", menu)
+        act_schedule_toggle.setCheckable(True)
+        act_schedule_toggle.setChecked(False)
+        act_schedule_toggle.triggered.connect(lambda checked: self.schedule_toggled.emit(bool(checked)))
+        self._act_schedule_toggle = act_schedule_toggle
+        self._premium_menu.addAction(act_schedule_toggle)
         
-        act_fire_drain = QAction("Drain me Mommy!", self._fire_menu)
+        act_fire_drain = QAction("Drain me Mommy!", self._premium_menu)
+        act_fire_drain.setEnabled(False)
         act_fire_drain.triggered.connect(self.fire_next_drain.emit)
-        self._fire_menu.addAction(act_fire_drain)
-
-        self._fire_menu.setEnabled(False)  # locked until paid
+        self._premium_menu.addAction(act_fire_drain)
+        self._act_fire_drain = act_fire_drain
         
         menu.addSeparator()
         
         act_pause = QAction("Pause/Resume session (Ctrl+Alt+F12)", menu)
         act_pause.triggered.connect(self.toggle_session_pause.emit)
         menu.addAction(act_pause)
+        
+        act_clear = QAction("Clear screen", menu)
+        act_clear.triggered.connect(self.clear_screen.emit)
+        menu.addAction(act_clear)
+        
+        act_restore_wallpaper = QAction("Restore wallpaper", menu)
+        act_restore_wallpaper.triggered.connect(self.restore_wallpaper.emit)
+        menu.addAction(act_restore_wallpaper)
 
         act_exit = QAction("Exit", menu)
         act_exit.triggered.connect(self.request_exit.emit)
@@ -244,6 +294,12 @@ class TrayManager(QObject):
         if hasattr(self, "_status_action"):
             self._status_action.setText(status_text)
         self.tray.setToolTip("\n".join(tip_lines))
+        
+    def update_profile_state(self, active_profile: str | None, profiles: list[str], schedule_enabled: bool) -> None:
+        self._current_profile = active_profile
+        self._known_profiles = sorted(profiles)
+        self._rebuild_profile_menu()
+        self._act_schedule_toggle.setChecked(schedule_enabled)
 
     def _rebuild_screens_menu(self) -> None:
         self._screens_menu.clear()
@@ -276,6 +332,25 @@ class TrayManager(QObject):
             act.setChecked(value == current)
             act.triggered.connect(lambda _=False, v=value: self._select_audio(v))
             self._audio_menu.addAction(act)
+            
+    def _rebuild_profile_menu(self) -> None:
+        self._profile_menu.clear()
+        
+        active = self._current_profile
+        profiles = self._known_profiles
+        
+        act_base = QAction("Base settings", self._profile_menu)
+        act_base.setCheckable(True)
+        act_base.setChecked(active is None)
+        act_base.triggered.connect(lambda: self.profile_selected.emit(None))
+        self._profile_menu.addAction(act_base)
+        
+        for name in profiles:
+            act = QAction(name, self._profile_menu)
+            act.setCheckable(True)
+            act.setChecked(name == active)
+            act.triggered.connect(lambda _=False, n=name: self.profile_selected.emit(n))
+            self._profile_menu.addAction(act)
             
     def _rebuild_session_receive_menu(self) -> None:
         self._session_receive_menu.clear()
@@ -386,6 +461,22 @@ class TrayManager(QObject):
             return
         self.default_overlay_changed.emit((url, float(opacity), int(val)))
         
+    def _prompt_image_popup_opacity(self) -> None:
+        from ui_settings import get_image_popup_opacity
+        current = get_image_popup_opacity()
+        val, ok = QInputDialog.getDouble(
+            None,
+            "Image Popup Opacity",
+            "Opacity (0.0 - 1.0):",
+            float(current),
+            0.0,
+            1.0,
+            2,
+        )
+        if not ok:
+            return
+        self.image_popup_opacity_changed.emit(float(val))
+        
     def _prompt_popup_sfx(self) -> None:
         # import lazily to keep tray_manager clean
         from ui_settings import get_popup_sfx_path
@@ -417,6 +508,89 @@ class TrayManager(QObject):
     def set_image_save_enabled_checked(self, enabled: bool) -> None:
         if hasattr(self, "_act_save_images"):
             self._act_save_images.setChecked(bool(enabled))
+            
+    def set_image_click_through_checked(self, enabled: bool) -> None:
+        if hasattr(self, "_act_click_through"):
+            self._act_click_through.setChecked(bool(enabled))
+    
+    def _prompt_wallpaper_set_cmd(self) -> None:
+        from ui_settings import get_wallpaper_set_cmd
+        current = get_wallpaper_set_cmd() or ""
+        text, ok = QInputDialog.getText(
+            None,
+            "Wallpaper Set Command",
+            "Shell command to set wallpaper.\n"
+            "Use {path} where the file path goes.\n\n"
+            "Examples:\n"
+            "  GNOME: gsettings set org.gnome.desktop.background picture-uri file://{path}\n"
+            "  XFCE: xfconf-query -c xfce4-desktop -p /backdrop/screen0/monitor0/workspace0/last-image -s {path}\n"
+            "  Hyprland: hyprctl hyprpaper wallpaper \",{path}\"\n"
+            "  Sway: swaymsg output '*' bg {path} fill\n"
+            "  feh (generic X11): feh --bg-fill {path}\n\n"
+            "Leave blank to disable.",
+            text=current,
+        )
+        if not ok:
+            return
+        cmd = (text or "").strip() or None
+        self.wallpaper_set_cmd_changed.emit(cmd)
+
+    def _prompt_wallpaper_get_cmd(self) -> None:
+        from ui_settings import get_wallpaper_get_cmd
+        current = get_wallpaper_get_cmd() or ""
+        text, ok = QInputDialog.getText(
+            None,
+            "Wallpaper Get Command",
+            "Shell command that prints your current wallpaper path.\n"
+            "Leave blank if restore isn't needed.\n\n"
+            "Examples:\n"
+            "  GNOME: gsettings get org.gnome.desktop.background picture-uri\n"
+            "  XFCE: xfconf-query -c xfce4-desktop -p /backdrop/screen0/monitor0/workspace0/last-image",
+            text=current,
+        )
+        if not ok:
+            return
+        cmd = (text or "").strip() or None
+        self.wallpaper_get_cmd_changed.emit(cmd)
+        
+    def _show_monitor_ids(self) -> None:
+        from PySide6.QtWidgets import QDialog, QLabel
+        from PySide6.QtGui import QFont
+        from PySide6.QtCore import QTimer
+        
+        screens = QApplication.screens()
+        dialogs = []
+        
+        for i, screen in enumerate(screens):
+            dlg = QDialog(None)
+            dlg.setWindowFlags(
+                Qt.FramelessWindowHint
+                | Qt.WindowStaysOnTopHint
+                | Qt.Tool
+            )
+            dlg.setAttribute(Qt.WA_TranslucentBackground)
+            
+            label = QLabel(f"Screen {i}", dlg)
+            f = QFont()
+            f.setPointSize(150)
+            f.setBold(True)
+            label.setFont(f)
+            label.setStyleSheet("QLabel { color: #4b006e; background: rgba(232, 217, 241, 200); padding: 40px; border-radius: 20px; }")
+            label.setAlignment(Qt.AlignCenter)
+            
+            geom = screen.availableGeometry()
+            dlg.setGeometry(geom)
+            label.setGeometry(
+                (geom.width() - 400) // 2,
+                (geom.height() - 200) // 2,
+                400,
+                200,
+            )
+            
+            dlg.show()
+            dialogs.append(dlg)
+
+        QTimer.singleShot(3000, lambda: [d.close() for d in dialogs])
 
     def apply_feature_gates(self, tier: str) -> None:
         tier = (tier or "free").strip().lower()
@@ -424,9 +598,12 @@ class TrayManager(QObject):
 
         if hasattr(self, "_act_customizer"):
             self._act_customizer.setEnabled(paid)
-            
-        if hasattr(self, "_act_behaviors"):
-            self._act_behaviors.setEnabled(paid)
         
-        if hasattr(self, "_fire_menu"):
-            self._fire_menu.setEnabled(paid)
+        if hasattr(self, "_act_fire_drain"):
+            self._act_fire_drain.setEnabled(paid)
+            
+        if hasattr(self, "_profile_menu"):
+            self._profile_menu.setEnabled(paid)
+
+        if hasattr(self, "_act_schedule_toggle"):
+            self._act_schedule_toggle.setEnabled(paid)

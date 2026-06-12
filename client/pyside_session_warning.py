@@ -3,7 +3,7 @@ from PySide6.QtWidgets import QDialog, QVBoxLayout, QLabel, QPushButton, QHBoxLa
 from PySide6.QtGui import QFont
 from PySide6.QtCore import Qt
 
-def run_session_warning_dialog(*, mode: str, title: str, summary: str, intensity, tags: list[str], blocks: list[str]) -> bool:
+def run_session_warning_dialog(*, mode: str, title: str, summary: str, intensity, tags: list[str], blocks: list[str], estimated_min: int | None = None) -> bool:
     """
     Returns True if user accepts (Start), False otherwise.
     mode:
@@ -40,6 +40,9 @@ def run_session_warning_dialog(*, mode: str, title: str, summary: str, intensity
         if blocks:
             layout.addWidget(QLabel("<b>Blocks:</b>"))
             layout.addWidget(QLabel("\n".join(f"• {b}" for b in blocks)))
+            
+    if estimated_min is not None and estimated_min > 0:
+        layout.addWidget(QLabel(f"<b>Estimated duration:</b> ~{estimated_min} min"))
 
     btn_row = QHBoxLayout()
     btn_start = QPushButton("Start")

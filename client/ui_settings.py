@@ -22,7 +22,13 @@ class AppSettings:
     image_save_enabled: bool = True
     image_save_dir: str | None = None
     
+    wallpaper_set_cmd: str | None = None
+    wallpaper_get_cmd: str | None = None
+    
     session_receive_mode: str = "full"  # "full" | "minimal" | "off"
+    
+    image_popup_opacity: float = 1.0
+    image_click_through: bool = False
 
 
 _SETTINGS = AppSettings()
@@ -81,6 +87,18 @@ def set_image_save_dir(path: str | None) -> None:
 def get_image_save_dir() -> str | None:
     return _SETTINGS.image_save_dir
 
+def set_wallpaper_set_cmd(cmd: str | None) -> None:
+    _SETTINGS.wallpaper_set_cmd = (cmd or "").strip() or None
+
+def get_wallpaper_set_cmd() -> str | None:
+    return _SETTINGS.wallpaper_set_cmd
+
+def set_wallpaper_get_cmd(cmd: str | None) -> None:
+    _SETTINGS.wallpaper_get_cmd = (cmd or "").strip() or None
+
+def get_wallpaper_get_cmd() -> str | None:
+    return _SETTINGS.wallpaper_get_cmd
+
 def set_session_receive_mode(mode: str) -> None:
     mode = (mode or "").strip().lower()
     if mode not in ("full", "minimal", "off"):
@@ -90,3 +108,17 @@ def set_session_receive_mode(mode: str) -> None:
 def get_session_receive_mode() -> str:
     return (_SETTINGS.session_receive_mode or "full").strip().lower()
 
+def set_image_popup_opacity(val: float) -> None:
+    try:
+        _SETTINGS.image_popup_opacity = max(0.0, min(1.0, float(val)))
+    except Exception:
+        _SETTINGS.image_popup_opacity = 1.0
+
+def get_image_popup_opacity() -> float:
+    return _SETTINGS.image_popup_opacity
+
+def set_image_click_through(val: bool) -> None:
+    _SETTINGS.image_click_through = bool(val)
+
+def get_image_click_through() -> bool:
+    return bool(_SETTINGS.image_click_through)

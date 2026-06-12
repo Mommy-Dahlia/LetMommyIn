@@ -415,8 +415,6 @@ def wrap_output(lines, delays):
 
     return steps
 
-DEFAULT_PACING_S = 8
-
 def effective_step_timer_s(step: dict) -> float:
     # The client defaults missing timer_s to 8s pacing
     t = step.get("timer_s")

@@ -48,10 +48,12 @@ class WfmManager(QObject):
     def cancel(self, *, clear_callback: bool = True) -> None:
         if self._active_dialog is not None:
             try:
-                self._active_dialog.close()
+                self._active_dialog.force_close()
             except Exception:
                 pass
         self._active_dialog = None
         if clear_callback:
             self._on_done = None
 
+    def is_active(self) -> bool:
+        return self._active_dialog is not None

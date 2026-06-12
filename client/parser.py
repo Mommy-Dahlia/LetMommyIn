@@ -9,7 +9,7 @@ from pyside_session_warning import run_session_warning_dialog
 from PySide6.QtCore import QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtMultimedia import QSoundEffect
-from session_runner import _apply_pns
+from session_runner import _apply_pns, _estimate_duration_s
 import os
 
 def _popup_delay():
@@ -242,6 +242,9 @@ def parse_command(data):
             steps = data.get("body")
             if not isinstance(steps, list):
                 raise ValueError("session_start body must be a list")
+                
+            estimated_s = _estimate_duration_s(steps)
+            estimated_min = int(estimated_s // 60)
 
             # ---- new: gate based on user preference ----
             mode = get_session_receive_mode()  # "full" | "minimal" | "off"
@@ -260,6 +263,7 @@ def parse_command(data):
                     intensity=intensity,
                     tags=[str(t) for t in tags if str(t).strip()],
                     blocks=[str(b) for b in blocks if str(b).strip()],
+                    estimated_min=estimated_min
                 )
                 if not accepted:
                     # Optional: if you want server visibility, push an ack
@@ -282,7 +286,7 @@ def parse_command(data):
                 raise RuntimeError("WFM manager not configured")
 
             text = data.get("text") or data.get("body") or ""
-            reps = data.get("reps") or data.get("targetreps") or 5
+            reps = data.get("reps") or data.get("targetreps") or 1
             cmd_id = data.get("id") or "-"
 
             # Pause session, resume only when done

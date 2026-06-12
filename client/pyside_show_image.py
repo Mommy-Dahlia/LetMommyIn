@@ -1,7 +1,8 @@
 from PySide6.QtCore import Qt, QTimer, QThread, Signal, QObject
 from PySide6.QtWidgets import QApplication, QDialog, QLabel
 from PySide6.QtGui import QPixmap, QScreen, QIcon
-from ui_settings import get_popup_screens, get_image_save_enabled, get_image_save_dir
+from ui_settings import get_popup_screens, get_image_save_enabled, get_image_save_dir, get_image_popup_opacity, get_image_click_through
+from pyside_overlay import make_click_through
 import sys
 import os
 from PIL import Image
@@ -135,7 +136,16 @@ class ImagePopup(QDialog):
         frmY = geom.y() + random.randint(0, max(0, geom.height() - self.height()))
         self.move(frmX, frmY)
         
+        self.setWindowOpacity(get_image_popup_opacity())    
+        if get_image_click_through():
+            self.setWindowFlag(Qt.WindowTransparentForInput, True)
+            self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+    
         self.show()
+        
+        if get_image_click_through():
+            make_click_through(int(self.winId()))
+    
         self.raise_()
         self.activateWindow()
 

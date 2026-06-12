@@ -16,8 +16,8 @@ import re
 
 import websockets
 import threading
-from PySide6.QtCore import QObject, Signal, QTimer
-from PySide6.QtWidgets import QApplication, QInputDialog, QMessageBox, QDialog
+from PySide6.QtCore import QObject, Signal, QTimer, Qt
+from PySide6.QtWidgets import QApplication, QInputDialog, QMessageBox, QDialog, QVBoxLayout, QLabel, QPushButton
 from PySide6.QtGui import QIcon
 if not sys.platform.startswith("linux"):
     from pynput import keyboard
@@ -32,10 +32,12 @@ from audio_manager import AudioManager
 from subliminal_manager import SubliminalManager
 from wfm_manager import WfmManager
 from tray_manager import TrayManager
+from wallpaper_manager import WallpaperManager
 from ui_settings import (
     set_popup_screens, set_pet_names, set_default_audio_url, set_default_overlay,
     get_pet_names, get_default_audio_url, get_default_overlay, set_popup_sfx_path,
-    set_image_save_enabled, set_image_save_dir, set_session_receive_mode
+    set_image_save_enabled, set_image_save_dir, set_session_receive_mode,
+    set_wallpaper_set_cmd, set_wallpaper_get_cmd, set_image_popup_opacity, set_image_click_through
 )
 from session_compiler import SessionCompiler
 from session_launcher import SessionLauncherDialog
@@ -44,6 +46,7 @@ from pyside_injection_summary import InjectionBatchNotifier, InjectEvent
 from behavior_manager import BehaviorManager, load_behaviors, save_behaviors, load_content_pool
 from behavior_settings_dialog import BehaviorSettingsDialog
 from session_customizer import SessionCustomizerDialog
+from onboarding import run_onboarding
 
 import ssl
 import certifi
@@ -160,6 +163,10 @@ class ClientConfig:
     image_save_dir: str | None = None
     tier: str = "free"
     session_receive_mode: str = "full"  # "full" | "minimal" | "off"
+    wallpaper_set_cmd: str | None = None
+    wallpaper_get_cmd: str | None = None
+    image_popup_opacity: float = 1.0
+    onboarding_version: str | None = None
     
 MANIFEST_PATH = CONFIG_DIR / "catalogue_manifest.json"
 
@@ -241,6 +248,9 @@ def load_config() -> ClientConfig | None:
 class CommandBridge(QObject):
     command_received = Signal(dict)
     toggle_pause = Signal()
+    tier_changed = Signal(str)
+    enroll_complete = Signal()
+    enroll_failed = Signal()
     
 class CommandDispatcher(QObject):
     def __init__(self, ack_queue: "queue.Queue[dict]"):
@@ -257,14 +267,11 @@ class CommandDispatcher(QObject):
             if hasattr(self, "cfg") and self.cfg is not None:
                 self.cfg.tier = tier
                 save_config(self.cfg)
+            if hasattr(self, "bridge") and self.bridge is not None:
+                self.bridge.tier_changed.emit(tier)
                 
             if hasattr(self, "behavior_manager") and self.behavior_manager is not None:
-                if tier == "paid":
-                    self.behavior_manager.start()
-                else:
-                    self.behavior_manager._general_timer.stop()
-                    self.behavior_manager._autodrainer_timer.stop()
-
+                self.behavior_manager.reload()
             # 2) update any in-memory UI settings (optional but useful)
             # If you don't want ui_settings to track tier yet, skip this.
             try:
@@ -289,15 +296,8 @@ class CommandDispatcher(QObject):
             return
         
         if t == "__enroll_complete__":
-            QMessageBox.information(
-                None,
-                "Welcome~",
-                "You're all set up, darling~\n\n"
-                "Mommy's app is now running in your system tray — "
-                "look for the icon in the bottom right corner of your screen "
-                "(you may need to click the little arrow to see it)~\n\n"
-                "If you're not sure what to do next, check the FAQ on the server~",
-            )
+            if hasattr(self, "bridge") and self.bridge is not None:
+                self.bridge.enroll_complete.emit()
             return
         
         if t == "__session_started__":
@@ -346,8 +346,8 @@ def build_hello(cfg) -> dict:
         "device_id": cfg.device_id,
         "username": cfg.username,
         "device_name": socket.gethostname(),
-        "version": "v0.2",
-        "protocol": "v0.2"
+        "version": "v0.3",
+        "protocol": "v0.3"
     }
 
 def parse_args():
@@ -735,6 +735,7 @@ async def run_client(cfg, bridge: CommandBridge, ack_queue: "queue.Queue[dict]",
             # If we're trying to enroll and the connection failed, ask for a new code next time
             if cfg.device_token is None:
                 pending_enroll_code = None
+                bridge.enroll_failed.emit()
                 
             if _NET_STOP.is_set():
                 return
@@ -894,7 +895,7 @@ def main() -> None:
             updated_at = cmd.get("updated_at") or int(time.time())
             incoming_tags = list(cmd.get("tags") or [])
             
-            if behavior_type not in ("toys_and_teases", "rules_and_tasks", "web_aided_tasks"):
+            if behavior_type not in ("toys_and_teases", "rules_and_tasks", "web_aided_tasks", "wfm", "either_or"):
                 logging.warning("Unknown behavior_type in inject_behavior: %s", behavior_type)
                 return
 
@@ -941,6 +942,9 @@ def main() -> None:
     set_image_save_enabled(cfg.image_save_enabled)
     set_image_save_dir(cfg.image_save_dir)
     
+    set_wallpaper_set_cmd(getattr(cfg, "wallpaper_set_cmd", None))
+    set_wallpaper_get_cmd(getattr(cfg, "wallpaper_get_cmd", None))
+    
     set_popup_screens(cfg.popup_screens)
     set_pet_names(cfg.pet_names)
     set_default_audio_url(cfg.default_audio_url)
@@ -951,6 +955,8 @@ def main() -> None:
     )
     set_popup_sfx_path(cfg.popup_sfx_path)
     set_session_receive_mode(getattr(cfg, "session_receive_mode", "full"))
+    set_image_popup_opacity(getattr(cfg, "image_popup_opacity", 1.0))
+    set_image_click_through(getattr(cfg, "image_click_through", False))
     
     if args.server:
         parsed = urlparse(args.server.strip())
@@ -973,6 +979,7 @@ def main() -> None:
     ack_queue = queue.Queue(maxsize=1000)
     set_ack_queue(ack_queue)
     dispatcher = CommandDispatcher(ack_queue)
+    content_roots = get_content_roots(CONFIG_DIR)
 
     session_runner = SessionRunner(dispatcher.handle_command)
     set_session_runner(session_runner)
@@ -983,19 +990,26 @@ def main() -> None:
     set_subliminal_manager(subliminal_manager)
     wfm_manager = WfmManager()
     set_wfm_manager(wfm_manager)
+    wallpaper_manager = WallpaperManager(
+        config_dir=CONFIG_DIR,
+        content_roots=content_roots,
+        custom_set_cmd=cfg.wallpaper_set_cmd,
+        custom_get_cmd=cfg.wallpaper_get_cmd,
+    )
     behavior_manager = BehaviorManager(
         config_dir=CONFIG_DIR,
         session_runner=session_runner,
+        wfm_manager=wfm_manager,
+        wallpaper_manager=wallpaper_manager,
         dispatch_command=dispatcher.handle_command,
         get_session_path=lambda stem: next(
             (p for name, p in get_session_choices() if name == stem), None
         ),
+        get_tier=lambda: getattr(cfg, "tier", "free"),
     )
-    if getattr(cfg, "tier", "free") == "paid":
-        behavior_manager.start()
+    behavior_manager.start()
     # --- Local sessions compiler (sessions/*.json + blocks/*.txt) ---
     # Dev: if there is a sessions/ folder next to this file, use it.
-    content_roots = get_content_roots(CONFIG_DIR)
     compiler = SessionCompiler(roots=content_roots)
 
     # Make sure the directories exist so users can drop files in immediately.
@@ -1018,6 +1032,7 @@ def main() -> None:
             stop_gif_overlays()
             behavior_manager._general_timer.stop()
             behavior_manager._autodrainer_timer.stop()
+            behavior_manager._schedule_timer.stop()
 
             # close dialogs
             close_all_messages()
@@ -1079,6 +1094,14 @@ def main() -> None:
                 choices.append((key, p))
         return choices
     
+    def sync_tray_profile_state():
+        behaviors = behavior_manager._behaviors
+        tray.update_profile_state(
+            active_profile=behaviors.get("active_profile"),
+            profiles=list(behaviors.get("profiles", {}).keys()),
+            schedule_enabled=bool(behaviors.get("schedule_enabled")),
+        )
+    
     def toggle_pause_from_hotkey():
     # Safe cross-thread hop into Qt
         bridge.toggle_pause.emit()
@@ -1110,9 +1133,12 @@ def main() -> None:
     dispatcher.cfg = cfg
     dispatcher.tray = tray
     dispatcher.behavior_manager = behavior_manager
+    dispatcher.bridge = bridge
 
     tray.audio_device_changed.connect(lambda dev_id: audio_manager.set_output_device_by_id(dev_id))
     tray.set_image_save_enabled_checked(cfg.image_save_enabled)
+    tray.set_image_click_through_checked(getattr(cfg, "image_click_through", False))
+    sync_tray_profile_state()
     
     def run_local_session(session_path: Path) -> None:
         try:
@@ -1172,6 +1198,41 @@ def main() -> None:
         save_config(cfg)
         set_image_save_dir(cfg.image_save_dir)
         
+    def on_wallpaper_set_cmd_changed(cmd: str | None) -> None:
+        cfg.wallpaper_set_cmd = cmd
+        save_config(cfg)
+        set_wallpaper_set_cmd(cmd)
+        wallpaper_manager._custom_set_cmd = cmd
+
+    def on_wallpaper_get_cmd_changed(cmd: str | None) -> None:
+        cfg.wallpaper_get_cmd = cmd
+        save_config(cfg)
+        set_wallpaper_get_cmd(cmd)
+        wallpaper_manager._custom_get_cmd = cmd
+        
+    def on_profile_selected(profile_name):
+        behavior_manager._behaviors["schedule_enabled"] = False
+        save_behaviors(CONFIG_DIR, behavior_manager._behaviors)
+        behavior_manager.set_active_profile(profile_name)
+        sync_tray_profile_state()
+    
+    def on_schedule_toggled(enabled):
+        behavior_manager._behaviors["schedule_enabled"] = bool(enabled)
+        save_behaviors(CONFIG_DIR, behavior_manager._behaviors)
+        if enabled:
+            behavior_manager._check_schedule()
+        sync_tray_profile_state()
+        
+    def on_image_popup_opacity_changed(val: float) -> None:
+        cfg.image_popup_opacity = float(val)
+        save_config(cfg)
+        set_image_popup_opacity(val)
+        
+    def on_clear_screen():
+        close_all_images()
+        close_all_messages()
+        stop_gif_overlays()
+        
     def open_session_launcher():
         def _on_allowed_changed(new_allowed: list[str]) -> None:
             behaviors = load_behaviors(CONFIG_DIR)
@@ -1202,20 +1263,18 @@ def main() -> None:
             )
         if dlg.exec() == QDialog.Accepted and dlg.result:
             logging.info("Saved custom session: %s", dlg.result.session_path)
-            tray.refresh_sessions_menu()
             
     def open_behavior_settings():
-        if getattr(cfg, "tier", "free") != "paid":
-            QMessageBox.information(None, "Locked", "Automated behaviors are a paid feature.")
-            return
         try:
             dlg = BehaviorSettingsDialog(
                 config_dir=CONFIG_DIR,
                 content_roots=content_roots,
                 compiler=compiler,
                 parent=None,
+                tier=getattr(cfg, "tier", "free"),
             )
             dlg.behaviors_changed.connect(behavior_manager.update_behaviors)
+            dlg.behaviors_changed.connect(lambda _: sync_tray_profile_state())
             dlg.exec()
         except Exception as e:
             logging.exception("Failed to open behavior settings")
@@ -1228,6 +1287,12 @@ def main() -> None:
         cfg.session_receive_mode = mode
         save_config(cfg)
         set_session_receive_mode(mode)
+        
+    def on_image_click_through_changed(enabled: bool) -> None:
+        cfg.image_click_through = bool(enabled)
+        save_config(cfg)
+        set_image_click_through(cfg.image_click_through)
+        tray.set_image_click_through_checked(cfg.image_click_through)
 
     tray.session_receive_mode_changed.connect(on_session_receive_mode_changed)
 
@@ -1241,22 +1306,70 @@ def main() -> None:
     tray.default_audio_url_changed.connect(on_default_audio_changed)
     tray.default_overlay_changed.connect(on_default_overlay_changed)
     tray.toggle_session_pause.connect(session_runner.toggle_pause)
-    
+    tray.restore_wallpaper.connect(wallpaper_manager.restore)
     tray.behavior_settings_requested.connect(open_behavior_settings)
+    tray.wallpaper_set_cmd_changed.connect(on_wallpaper_set_cmd_changed)
+    tray.wallpaper_get_cmd_changed.connect(on_wallpaper_get_cmd_changed)
+    tray.profile_selected.connect(on_profile_selected)
+    tray.schedule_toggled.connect(on_schedule_toggled)
+    tray.image_click_through_changed.connect(on_image_click_through_changed)
+    tray.image_popup_opacity_changed.connect(on_image_popup_opacity_changed)
+    tray.clear_screen.connect(on_clear_screen)
 
     tray.fire_next_drain.connect(behavior_manager.trigger_drain) 
 
     tray.fire_next_event.connect(behavior_manager.trigger_next_event)
+    
+    def _on_enroll_failed():
+        dlg = QDialog(None)
+        dlg.setWindowTitle("Hmm~")
+        dlg.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+        layout = QVBoxLayout(dlg)
+        
+        layout.addWidget(QLabel(
+            "That code didn't work, darling.\n\n"
+            "Make sure you're using the code Mommy gave you,\n"
+            "and that it hasn't expired~"
+        ))
+        
+        btn = QPushButton("OK")
+        btn.clicked.connect(dlg.accept)
+        layout.addWidget(btn)
+        
+        dlg.exec()
 
+    bridge.enroll_failed.connect(_on_enroll_failed)
     bridge.command_received.connect(dispatcher.handle_command)
-
+    
     initial_enroll_code: str | None = None
     if cfg.device_token is None:
         initial_enroll_code = get_enroll_code_or_exit()
 
     t = threading.Thread(target=_network_thread_main, args=(cfg, bridge, ack_queue, initial_enroll_code), daemon=True)
     t.start()
-
+    
+    def check_for_onboarding():
+        if getattr(cfg, "onboarding_version", None) != "0.3":
+            run_onboarding(
+                cfg=cfg,
+                config_dir=CONFIG_DIR,
+                save_config=save_config,
+                behavior_manager=behavior_manager,
+                tray=tray,
+                content_roots=content_roots,
+                compiler=compiler,
+                tier_signal=bridge.tier_changed,
+            )
+            cfg.onboarding_version = "0.3"
+            save_config(cfg)
+        
+    if cfg.device_token is not None:
+        # Existing user — run onboarding immediately
+        check_for_onboarding()
+    else:
+        # New user — wait for enrollment to succeed first
+        bridge.enroll_complete.connect(check_for_onboarding)    
+    
     app.exec()
 
 if __name__ == "__main__":

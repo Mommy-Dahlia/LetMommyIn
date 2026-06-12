@@ -57,6 +57,10 @@ class WriteForMommy(QDialog):
             
     def _on_text_edited(self):
         self._debounce_timer.start(200)  # ms; tweak 150–300
+        
+    def force_close(self):
+        self._allow_close = True
+        self.close()
 
     def initUI(self, text):
         self.targettext = text
@@ -114,6 +118,6 @@ def show_wfm(text: str, targetreps: int):
 def close_all_wfm() -> None:
     for dlg in list(_ACTIVE_DIALOGS):
         try:
-            dlg.close()
+            dlg.force_close()
         except Exception:
             pass

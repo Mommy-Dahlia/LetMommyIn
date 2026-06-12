@@ -37,7 +37,6 @@ class SessionCompiler:
         self.local_root = roots[0]
         self.sessions_dir = self.local_root / "sessions"
         self.blocks_dir = self.local_root / "blocks"
-        self.images_csv_path = resource_path("images.csv")
 
     def _find_first(self, rel: str) -> Path | None:
         for r in self.roots:

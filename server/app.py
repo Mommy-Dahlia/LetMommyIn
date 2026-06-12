@@ -28,7 +28,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 _ET = ZoneInfo("America/New_York")
-PROTOCOL_VERSION = "v0.2"
+PROTOCOL_VERSION = "v0.3"
 MAX_LOG_EVENTS = 1000
 
 def fmt_unix_et(ts: int | float | str | None) -> str:
@@ -1129,6 +1129,8 @@ def behaviors_page(request: Request):
     toys = catalogue_list_behavior_entries(behavior_type="toys_and_teases")
     rules = catalogue_list_behavior_entries(behavior_type="rules_and_tasks")
     web = catalogue_list_behavior_entries(behavior_type="web_aided_tasks")
+    wfm = catalogue_list_behavior_entries(behavior_type="wfm")
+    either_or = catalogue_list_behavior_entries(behavior_type="either_or")
     return templates.TemplateResponse(
         "behaviors.html",
         {
@@ -1136,6 +1138,8 @@ def behaviors_page(request: Request):
             "toys": toys,
             "rules": rules,
             "web": web,
+            "wfm": wfm,
+            "either_or": either_or,
         }
     )
 
@@ -1271,6 +1275,82 @@ def save_web_aided_tasks(
     catalogue_upsert_behavior_entry(name, "web_aided_tasks", audience, entry)
     return PlainTextResponse(f"Saved web_aided_tasks: {name}")
 
+@admin_router.post("/behaviors/save/wfm")
+def save_wfm(
+    name: str = Form(...),
+    audience: str = Form("all"),
+    text: str = Form(...),
+    tags: str = Form(""),
+    overwrite: str = Form("0"),
+):
+    name = name.strip()
+    if not name:
+        return PlainTextResponse("name is required", status_code=400)
+
+    audience = audience.strip().lower()
+    if audience not in ("all", "paid"):
+        return PlainTextResponse("audience must be all or paid", status_code=400)
+
+    text = text.strip()
+    if not text:
+        return PlainTextResponse("text is required", status_code=400)
+
+    overwrite_flag = overwrite.strip() in ("1", "true", "yes")
+    existing = catalogue_get_behavior_entry(name, "wfm")
+    if existing and not overwrite_flag:
+        return PlainTextResponse(
+            f"Entry '{name}' already exists. Re-submit with overwrite=1 to replace.",
+            status_code=409,
+        )
+
+    tag_list = normalize_tags_csv(tags)
+    entry = {"text": text, "tags": tag_list}
+    catalogue_upsert_behavior_entry(name, "wfm", audience, entry)
+    return PlainTextResponse(f"Saved wfm: {name}")
+
+@admin_router.post("/behaviors/save/either_or")
+def save_either_or(
+    name: str = Form(...),
+    audience: str = Form("all"),
+    task_a: str = Form(...),
+    task_b: str = Form(...),
+    timer_minutes: str = Form("5"),
+    reward: str = Form(...),
+    tags: str = Form(""),
+    overwrite: str = Form("0"),
+):
+    name = name.strip()
+    if not name:
+        return PlainTextResponse("name is required", status_code=400)
+
+    audience = audience.strip().lower()
+    if audience not in ("all", "paid"):
+        return PlainTextResponse("audience must be all or paid", status_code=400)
+
+    overwrite_flag = overwrite.strip() in ("1", "true", "yes")
+    existing = catalogue_get_behavior_entry(name, "either_or")
+    if existing and not overwrite_flag:
+        return PlainTextResponse(
+            f"Entry '{name}' already exists. Re-submit with overwrite=1 to replace.",
+            status_code=409,
+        )
+
+    try:
+        timer_val = float(timer_minutes.strip())
+    except Exception:
+        return PlainTextResponse("timer_minutes must be a number", status_code=400)
+
+    tag_list = normalize_tags_csv(tags)
+    entry = {
+        "task_a": task_a.strip(),
+        "task_b": task_b.strip(),
+        "timer_minutes": timer_val,
+        "reward": reward.strip(),
+        "tags": tag_list,
+    }
+    catalogue_upsert_behavior_entry(name, "either_or", audience, entry)
+    return PlainTextResponse(f"Saved either_or: {name}")
+
 @admin_router.post("/behaviors/delete")
 def delete_behavior_entry(
     name: str = Form(...),
@@ -1279,7 +1359,7 @@ def delete_behavior_entry(
     name = name.strip()
     behavior_type = behavior_type.strip()
 
-    if behavior_type not in ("toys_and_teases", "rules_and_tasks", "web_aided_tasks"):
+    if behavior_type not in ("toys_and_teases", "rules_and_tasks", "web_aided_tasks", "wfm", "either_or"):
         return PlainTextResponse("invalid behavior_type", status_code=400)
 
     deleted = catalogue_delete_behavior_entry(name, behavior_type)
@@ -1463,22 +1543,10 @@ class Hub:
         
         self.last_command_ts: float | None = None
 
-    def register(self, device: DeviceInfo, ws: WebSocket):
-        self.connections[device.device_id] = ws
-        self.devices[device.device_id] = device
-
-        self.logs.append(
-            LogEvent(
-                ts=time.time(),
-                device_id=device.device_id,
-                event="connect",
-                detail=f"{device.username} @ {device.device_name}"
-            )
-        )
-        if len(self.logs) > MAX_LOG_EVENTS:
-            self.logs.pop(0)
-
-    def unregister(self, device_id: str):
+    def unregister(self, device_id: str, ws: WebSocket = None):
+        if ws is not None and self.connections.get(device_id) is not ws:
+            # A newer connection already replaced this one; don't remove it
+            return
         self.connections.pop(device_id, None)
         self.clear_session(device_id)
         dev = self.devices.get(device_id)
@@ -1578,9 +1646,9 @@ def get_devices():
 @app.get("/device/{device_id}", response_class=HTMLResponse)
 def device_page(request: Request, device_id: str):
     d = hub.devices.get(device_id)
-    sess = hub.active_sessions.get(d.device_id)
     if not d:
         raise HTTPException(status_code=404, detail="Unknown device")
+    sess = hub.active_sessions.get(d.device_id)
     last_seen_ts = as_ts(d.last_seen)
     device = {
         "device_id": d.device_id,

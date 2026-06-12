@@ -23,3 +23,4 @@ client/*.spec
 # OS
 .DS_Store
 Thumbs.db
+client/Videos - Shortcut.lnk
