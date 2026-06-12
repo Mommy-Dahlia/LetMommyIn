@@ -1542,6 +1542,20 @@ class Hub:
         self.active_sessions: dict[str, ActiveSession] = {}
         
         self.last_command_ts: float | None = None
+        
+    def register(self, dev: DeviceInfo, ws: WebSocket):
+        self.devices[dev.device_id] = dev
+        self.connections[dev.device_id] = ws
+        self.logs.append(
+            LogEvent(
+                ts=time.time(),
+                device_id=dev.device_id,
+                event="connect",
+                detail=f"{dev.username} @ {dev.device_name}"
+            )
+        )
+        if len(self.logs) > MAX_LOG_EVENTS:
+            self.logs.pop(0)
 
     def unregister(self, device_id: str, ws: WebSocket = None):
         if ws is not None and self.connections.get(device_id) is not ws:
