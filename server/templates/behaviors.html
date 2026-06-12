@@ -229,6 +229,141 @@
       <pre id="web-result"></pre>
     </div>
 
+    <!-- ==================== WRITE FOR ME ==================== -->
+    <div class="section">
+      <h2>Write For Me</h2>
+
+      <div class="entry-list">
+        <b>Existing entries:</b>
+        {% if wfm %}
+          {% for w in wfm %}
+          <div class="entry-row">
+            <span>{{ w.name }}</span>
+            <span class="muted">({{ w.audience }})</span>
+            <span class="muted">{{ w.tags | join(', ') }}</span>
+            <button type="button" onclick="loadEntry('wfm', '{{ w.name }}')">Load</button>
+            <form hx-post="/admin/behaviors/delete" hx-target="#wfm-result" hx-swap="innerHTML" style="display:inline;">
+              <input type="hidden" name="name" value="{{ w.name }}" />
+              <input type="hidden" name="behavior_type" value="wfm" />
+              <button type="submit">Delete</button>
+            </form>
+          </div>
+          {% endfor %}
+        {% else %}
+          <div class="muted">No entries yet.</div>
+        {% endif %}
+      </div>
+
+      <form hx-post="/admin/behaviors/save/wfm" hx-target="#wfm-result" hx-swap="innerHTML">
+        <p>
+          <label>Entry name<br/>
+            <input name="name" id="wfm-name" required style="width: 24rem;" />
+          </label>
+        </p>
+        <p>
+          <label>Audience<br/>
+            <select name="audience">
+              <option value="all">All</option>
+              <option value="paid">Paid</option>
+            </select>
+          </label>
+        </p>
+        <p>
+          <label>Text (what the user must type)<br/>
+            <textarea name="text" id="wfm-text" rows="3" required placeholder="I obey Mommy~"></textarea>
+          </label>
+        </p>
+        <p>
+          <label>Tags (comma-separated)<br/>
+            <input name="tags" id="wfm-tags" style="width: 100%;" placeholder="hypnosis, tease, mild" />
+          </label>
+        </p>
+        <p>
+          <label>
+            <input type="checkbox" name="overwrite" value="1" />
+            Overwrite if name exists
+          </label>
+        </p>
+        <button type="submit">Save</button>
+      </form>
+      <pre id="wfm-result"></pre>
+    </div>
+
+    <!-- ==================== EITHER/OR TASKS ==================== -->
+    <div class="section">
+      <h2>Either/Or Tasks</h2>
+
+      <div class="entry-list">
+        <b>Existing entries:</b>
+        {% if either_or %}
+          {% for e in either_or %}
+          <div class="entry-row">
+            <span>{{ e.name }}</span>
+            <span class="muted">({{ e.audience }})</span>
+            <span class="muted">{{ e.tags | join(', ') }}</span>
+            <button type="button" onclick="loadEntry('either_or', '{{ e.name }}')">Load</button>
+            <form hx-post="/admin/behaviors/delete" hx-target="#either-or-result" hx-swap="innerHTML" style="display:inline;">
+              <input type="hidden" name="name" value="{{ e.name }}" />
+              <input type="hidden" name="behavior_type" value="either_or" />
+              <button type="submit">Delete</button>
+            </form>
+          </div>
+          {% endfor %}
+        {% else %}
+          <div class="muted">No entries yet.</div>
+        {% endif %}
+      </div>
+
+      <form hx-post="/admin/behaviors/save/either_or" hx-target="#either-or-result" hx-swap="innerHTML">
+        <p>
+          <label>Entry name<br/>
+            <input name="name" id="either-or-name" required style="width: 24rem;" />
+          </label>
+        </p>
+        <p>
+          <label>Audience<br/>
+            <select name="audience">
+              <option value="all">All</option>
+              <option value="paid">Paid</option>
+            </select>
+          </label>
+        </p>
+        <p>
+          <label>Task A<br/>
+            <textarea name="task_a" id="either-or-task-a" rows="3" required></textarea>
+          </label>
+        </p>
+        <p>
+          <label>Task B<br/>
+            <textarea name="task_b" id="either-or-task-b" rows="3" required></textarea>
+          </label>
+        </p>
+        <p>
+          <label>Timer (minutes)<br/>
+            <input name="timer_minutes" id="either-or-timer" type="number" min="1" value="5" required />
+          </label>
+        </p>
+        <p>
+          <label>Reward text<br/>
+            <textarea name="reward" id="either-or-reward" rows="3" required></textarea>
+          </label>
+        </p>
+        <p>
+          <label>Tags (comma-separated)<br/>
+            <input name="tags" id="either-or-tags" style="width: 100%;" placeholder="hypnosis, tease, mild" />
+          </label>
+        </p>
+        <p>
+          <label>
+            <input type="checkbox" name="overwrite" value="1" />
+            Overwrite if name exists
+          </label>
+        </p>
+        <button type="submit">Save</button>
+      </form>
+      <pre id="either-or-result"></pre>
+    </div>
+
     <script>
       function loadEntry(type, name) {
         fetch(`/admin/behaviors/load?name=${encodeURIComponent(name)}&behavior_type=${encodeURIComponent(type)}`)
@@ -255,6 +390,17 @@
               document.getElementById('web-tags').value = (data.entry.tags || []).join(', ');
               document.getElementById('web-url').value = data.entry.url || '';
               document.getElementById('web-message').value = data.entry.message || '';
+            } else if (type === 'wfm') {
+              document.getElementById('wfm-name').value = data.name;
+              document.getElementById('wfm-tags').value = (data.entry.tags || []).join(', ');
+              document.getElementById('wfm-text').value = data.entry.text || '';
+            } else if (type === 'either_or') {
+              document.getElementById('either-or-name').value = data.name;
+              document.getElementById('either-or-tags').value = (data.entry.tags || []).join(', ');
+              document.getElementById('either-or-task-a').value = data.entry.task_a || '';
+              document.getElementById('either-or-task-b').value = data.entry.task_b || '';
+              document.getElementById('either-or-timer').value = data.entry.timer_minutes || 5;
+              document.getElementById('either-or-reward').value = data.entry.reward || '';
             }
           });
       }
