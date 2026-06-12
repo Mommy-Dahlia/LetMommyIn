@@ -27,6 +27,10 @@ from fastapi.templating import Jinja2Templates
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+)
 _ET = ZoneInfo("America/New_York")
 PROTOCOL_VERSION = "v0.3"
 MAX_LOG_EVENTS = 1000
