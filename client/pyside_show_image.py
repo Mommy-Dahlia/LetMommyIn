@@ -197,3 +197,27 @@ def close_all_images() -> None:
             dlg.close()
         except Exception:
             pass
+
+def update_all_image_opacity() -> None:
+    opacity = get_image_popup_opacity()
+    for dlg in list(_ACTIVE_DIALOGS):
+        try:
+            dlg.setWindowOpacity(opacity)
+        except Exception:
+            pass
+
+def update_all_image_click_through() -> None:
+    click_through = get_image_click_through()
+    for dlg in list(_ACTIVE_DIALOGS):
+        try:
+            if click_through:
+                dlg.setWindowFlag(Qt.WindowTransparentForInput, True)
+                dlg.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+                dlg.show()  # required after changing window flags
+                make_click_through(int(dlg.winId()))
+            else:
+                dlg.setWindowFlag(Qt.WindowTransparentForInput, False)
+                dlg.setAttribute(Qt.WA_TransparentForMouseEvents, False)
+                dlg.show()
+        except Exception:
+            pass

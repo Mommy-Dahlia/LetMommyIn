@@ -1,7 +1,7 @@
 from behavior_manager import DEFAULT_BEHAVIORS, _merge_defaults
 import copy
 
-REQUIRED_CHOICE_TAGS = {"masculinity", "femininity", "other gender fuckery"}
+REQUIRED_CHOICE_TAGS = {"masculinity", "femininity", "other gender fuckery", "b*s", "bunny", "puppy"}
 
 def build_mommy_profile(tier: str = "free") -> dict:
     """Returns a profile dict ready to insert into behaviors['profiles']."""
@@ -23,6 +23,8 @@ def build_mommy_profile(tier: str = "free") -> dict:
             },
             "behavior_weights": {},
             "tag_weights": {},
+            "image_popup_opacity": 1.0,
+            "image_click_through": False,
         }
     else:
         return {
@@ -42,6 +44,8 @@ def build_mommy_profile(tier: str = "free") -> dict:
             },
             "behavior_weights": {},
             "tag_weights": {},
+            "image_popup_opacity": 1.0,
+            "image_click_through": False,
         }
 
 def build_work_profile(work_start_h: int = 9, work_end_h: int = 17) -> dict:
@@ -63,6 +67,8 @@ def build_work_profile(work_start_h: int = 9, work_end_h: int = 17) -> dict:
         },
         "behavior_weights": {},
         "tag_weights": {},
+        "image_popup_opacity": 0.3,
+        "image_click_through": False,
     }
 
 def build_work_schedule(work_start_h: int = 9, work_end_h: int = 17, main_profile: str = "Onboarding") -> list:

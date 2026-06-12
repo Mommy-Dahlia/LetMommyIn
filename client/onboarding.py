@@ -22,11 +22,10 @@ from ui_settings import (
 
 REQUIRED_TAG_CHOICES = [
     {
-        "label": "Gendered content — pick what fits you~",
+        "label": "This content isn't for all of Mommy's subs~  Pick what fits you~",
         "tags": sorted(REQUIRED_CHOICE_TAGS),
     },
 ]
-
 
 def _step_pet_names(cfg, save_config) -> bool:
     dlg = QDialog(None)

@@ -24,7 +24,7 @@ if not sys.platform.startswith("linux"):
 
 from parser import parse_command, _apply_client_session_defaults, set_session_runner, set_audio_manager, set_subliminal_manager, set_wfm_manager, set_ack_queue, set_injection_handler
 from pyside_show_message import close_all_messages
-from pyside_show_image import close_all_images
+from pyside_show_image import close_all_images, update_all_image_opacity, update_all_image_click_through
 from pyside_show_writeforme import close_all_wfm
 from pyside_overlay import stop_gif_overlays
 from session_runner import SessionRunner
@@ -1227,6 +1227,7 @@ def main() -> None:
         cfg.image_popup_opacity = float(val)
         save_config(cfg)
         set_image_popup_opacity(val)
+        update_all_image_opacity()
         
     def on_clear_screen():
         close_all_images()
@@ -1293,6 +1294,7 @@ def main() -> None:
         save_config(cfg)
         set_image_click_through(cfg.image_click_through)
         tray.set_image_click_through_checked(cfg.image_click_through)
+        update_all_image_click_through()
 
     tray.session_receive_mode_changed.connect(on_session_receive_mode_changed)
 

@@ -8,6 +8,11 @@ from PySide6.QtWidgets import (
     QComboBox, QLineEdit, QGridLayout
 )
 from behavior_manager import load_behaviors, save_behaviors, AUTODRAINER_URLS
+from ui_settings import get_image_popup_opacity, get_image_click_through
+
+class NoScrollComboBox(QComboBox):
+    def wheelEvent(self, event):
+        event.ignore()
 
 class StepSpinBox(QWidget):
     valueChanged = Signal(float)
@@ -429,6 +434,8 @@ class BehaviorSettingsDialog(QDialog):
                 profile["general_frequency"] = freq
                 profile["behavior_weights"] = bw
                 profile["tag_weights"] = tw
+                profile["image_popup_opacity"] = get_image_popup_opacity()
+                profile["image_click_through"] = get_image_click_through()
             else:
                 self._behaviors["enabled"] = enabled
                 self._behaviors["general_frequency"] = freq
@@ -503,6 +510,8 @@ class BehaviorSettingsDialog(QDialog):
             "behavior_weights": {},
             "tag_weights": {},
             "general_frequency": dict(self._behaviors.get("general_frequency", {})),
+            "image_popup_opacity": get_image_popup_opacity(),
+            "image_click_through": get_image_click_through(),
         }
         
         self._profile_combo.addItem(name, name)

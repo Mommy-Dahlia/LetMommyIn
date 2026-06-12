@@ -339,8 +339,25 @@ class BehaviorManager(QObject):
         save_behaviors(self._config_dir, self._behaviors)
         self._schedule_general()
         self._schedule_autodrainer()
+        self._apply_profile_display_settings()
+        
+    def _apply_profile_display_settings(self) -> None:
+        from ui_settings import set_image_popup_opacity, set_image_click_through, get_image_popup_opacity, get_image_click_through
+        from pyside_show_image import update_all_image_opacity, update_all_image_click_through
+        
+        opacity = self._effective_image_popup_opacity()
+        if opacity is not None:
+            set_image_popup_opacity(opacity)
+            update_all_image_opacity()
+        
+        click_through = self._effective_image_click_through()
+        if click_through is not None:
+            set_image_click_through(click_through)
+            update_all_image_click_through()
         
     def _check_schedule(self) -> None:
+        if not self._behaviors.get("schedule_enabled"):
+            return
         resolved = _resolve_scheduled_profile(self._behaviors)
         current = self._behaviors.get("active_profile")
         if resolved != current:
@@ -481,6 +498,22 @@ class BehaviorManager(QObject):
             if profile and "general_frequency" in profile:
                 return profile["general_frequency"]
         return self._behaviors.get("general_frequency", {})
+    
+    def _effective_image_popup_opacity(self) -> float | None:
+        profile_name = self._behaviors.get("active_profile")
+        if profile_name:
+            profile = self._behaviors.get("profiles", {}).get(profile_name)
+            if profile and "image_popup_opacity" in profile:
+                return float(profile["image_popup_opacity"])
+        return None
+
+    def _effective_image_click_through(self) -> bool | None:
+        profile_name = self._behaviors.get("active_profile")
+        if profile_name:
+            profile = self._behaviors.get("profiles", {}).get(profile_name)
+            if profile and "image_click_through" in profile:
+                return bool(profile["image_click_through"])
+        return None
     
     def _fire_general(self) -> None:
         candidates = self._enabled_general_behaviors()
