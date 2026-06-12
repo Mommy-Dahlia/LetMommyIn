@@ -19,6 +19,7 @@ import hashlib
 import secrets
 import TheFactory
 import logging
+import sys
 
 from fastapi import FastAPI, APIRouter, Request, WebSocket, WebSocketDisconnect, HTTPException, Form, UploadFile, File, Body
 from fastapi.responses import HTMLResponse, PlainTextResponse, JSONResponse
@@ -32,6 +33,7 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(message)s",
     force=True,
 )
+print("APP STARTING", file=sys.stderr, flush=True)
 _ET = ZoneInfo("America/New_York")
 PROTOCOL_VERSION = "v0.3"
 MAX_LOG_EVENTS = 1000
