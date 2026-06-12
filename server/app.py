@@ -28,11 +28,11 @@ from fastapi.templating import Jinja2Templates
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
-    force=True,
-)
+logger = logging.getLogger("lmi")
+logger.setLevel(logging.INFO)
+_handler = logging.StreamHandler()
+_handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s"))
+logger.addHandler(_handler)
 print("APP STARTING", file=sys.stderr, flush=True)
 _ET = ZoneInfo("America/New_York")
 PROTOCOL_VERSION = "v0.3"
@@ -2350,6 +2350,7 @@ async def inject_session_broadcast(
 
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket):
+    logger.info("WS connection from %s", ws.client)
     await ws.accept()
     
     device_token = ws.query_params.get("device_token")
@@ -2357,7 +2358,7 @@ async def ws_endpoint(ws: WebSocket):
 
 
     if (device_token is None) == (enroll_code is None):
-        logging.warning("WS auth rejected: must supply exactly one of device_token or enroll_code")
+        logger.warning("WS auth rejected: must supply exactly one of device_token or enroll_code")
         await ws.close(code=1008)
         return
     
@@ -2365,13 +2366,13 @@ async def ws_endpoint(ws: WebSocket):
     if device_token:
         expected_device_id = get_device_id_for_token(device_token)
         if not expected_device_id:
-            logging.warning("WS auth rejected: unknown device_token")
+            logger.warning("WS auth rejected: unknown device_token")
             await ws.close(code=1008)
             return
 
     if enroll_code:
         if not consume_enroll_code(enroll_code):
-            logging.warning("WS auth rejected: invalid or expired enroll_code")
+            logger.warning("WS auth rejected: invalid or expired enroll_code")
             await ws.close(code=1008)
             return
 
@@ -2395,6 +2396,7 @@ async def ws_endpoint(ws: WebSocket):
         protocol = str(msg.get("protocol","v0.0")).strip()[:8]
         
         if protocol != PROTOCOL_VERSION:
+            logger.warning("WS protocol mismatch: got %s, expected %s, device_id=%s", protocol, PROTOCOL_VERSION, device_id)
             await ws.close(code=1008)
             return
 
@@ -2443,6 +2445,7 @@ async def ws_endpoint(ws: WebSocket):
             version=version,
         )
         hub.register(dev, ws)
+        logger.info("Registered device_id=%s username=%s version=%s", device_id, username, version)
         
         tier = get_device_tier(device_id)
 
@@ -2538,6 +2541,7 @@ async def ws_endpoint(ws: WebSocket):
                 session_id = str(msg.get("session_id") or "")
                 hub.record_session_start(device_id, session_id, estimated_s, started_at)
             else:
+                logger.warning("Unknown client message type=%s from device_id=%s", mtype, device_id)
                 hub.log(device_id, "client_message", detail=f"unknown type: {mtype}")
                 await ws.close(code=1003)
                 return
@@ -2545,6 +2549,8 @@ async def ws_endpoint(ws: WebSocket):
     except WebSocketDisconnect:
         # Client disconnected normally
         pass
+    except Exception as e:
+        logger.exception("ws_endpoint crashed for device_id=%s", device_id)
     finally:
         if device_id:
-            hub.unregister(device_id)
+            hub.unregister(device_id, ws)
