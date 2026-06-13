@@ -21,7 +21,12 @@ def build_mommy_profile(tier: str = "free") -> dict:
                 "min_minutes": 10,
                 "random_minutes": 10,
             },
-            "behavior_weights": {},
+            "behavior_weights": {
+                "toys_and_teases": 2.0,
+                "wfm": 2.0,
+                "wallpaper": 0.5,
+                "session": 0.5,
+            },
             "tag_weights": {},
             "image_popup_opacity": 1.0,
             "image_click_through": False,
