@@ -998,6 +998,7 @@ def main() -> None:
     )
     behavior_manager = BehaviorManager(
         config_dir=CONFIG_DIR,
+        content_roots=content_roots,
         session_runner=session_runner,
         wfm_manager=wfm_manager,
         wallpaper_manager=wallpaper_manager,

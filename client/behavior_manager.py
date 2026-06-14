@@ -12,6 +12,8 @@ from PySide6.QtWidgets import QDialog, QVBoxLayout, QLabel, QPushButton, QHBoxLa
 from session_runner import _apply_pns
 from session_compiler import resource_path
 
+from TheFactory import load_images, assign_images
+
 BEHAVIORS_VERSION = 2
 
 FREE_BEHAVIORS = {"toys_and_teases", "wfm", "bunny_bomb"}
@@ -272,6 +274,7 @@ class BehaviorManager(QObject):
         self,
         *,
         config_dir: Path,
+        content_roots,
         session_runner,
         wfm_manager,
         wallpaper_manager,
@@ -281,6 +284,7 @@ class BehaviorManager(QObject):
     ):
         super().__init__()
         self._config_dir = config_dir
+        self._content_roots = content_roots
         self._session_runner = session_runner
         self._wfm_manager = wfm_manager
         self._wallpaper_manager = wallpaper_manager
@@ -354,6 +358,24 @@ class BehaviorManager(QObject):
         if click_through is not None:
             set_image_click_through(click_through)
             update_all_image_click_through()
+            
+    def _replace_pics(self, text: str) -> str:
+        if "#PIC" not in text:
+            return text
+        csv_path = None
+        for root in self._content_roots:
+            candidate = root / "images.csv"
+            if candidate.exists():
+                csv_path = candidate
+                break
+        if not csv_path:
+            return text
+        images = load_images(str(csv_path))
+        if not images:
+            return text
+        lines = text.split("\n")
+        lines = assign_images(lines, images)
+        return "\n".join(lines)
         
     def _check_schedule(self) -> None:
         if not self._behaviors.get("schedule_enabled"):
@@ -544,6 +566,7 @@ class BehaviorManager(QObject):
         offset_ms = 0
         for msg in messages:
             text = str(msg.get("text", ""))
+            text = self._replace_pics(str(msg.get("text", "")))
             delay_s = float(msg.get("delay_seconds", 5))
 
             QTimer.singleShot(
@@ -669,7 +692,7 @@ class BehaviorManager(QObject):
         from parser import _apply_client_session_defaults
         from session_compiler import SessionCompiler
         try:
-            compiler = SessionCompiler(roots=[path.parent.parent])
+            compiler = SessionCompiler(roots=self._content_roots)
             compiled = compiler.compile_steps(path)
             steps = _apply_client_session_defaults(compiled.steps)
             self._session_runner.start(
