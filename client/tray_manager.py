@@ -46,6 +46,10 @@ class TrayManager(QObject):
     schedule_toggled = Signal(object)
     image_popup_opacity_changed = Signal(object)
     image_click_through_changed = Signal(object)
+    image_popup_scale_changed = Signal(object)
+    session_speed_changed = Signal(object)
+    export_settings_requested = Signal()
+    import_settings_requested = Signal()
     clear_screen = Signal()
 
     def __init__(
@@ -144,6 +148,10 @@ class TrayManager(QObject):
         act_identify.triggered.connect(self._show_monitor_ids)
         menu.addAction(act_identify)
         
+        act_img_scale = QAction("Set image popup scale...", self._defaults_menu)
+        act_img_scale.triggered.connect(self._prompt_image_popup_scale)
+        self._defaults_menu.addAction(act_img_scale)
+        
         act_img_opacity = QAction("Set image popup opacity...", self._defaults_menu)
         act_img_opacity.triggered.connect(self._prompt_image_popup_opacity)
         self._defaults_menu.addAction(act_img_opacity)
@@ -158,6 +166,17 @@ class TrayManager(QObject):
         act_sfx = QAction("Set popup sound (local path)...", self._defaults_menu)
         act_sfx.triggered.connect(self._prompt_popup_sfx)
         self._defaults_menu.addAction(act_sfx)
+        
+        self._speed_menu = self._defaults_menu.addMenu("Session speed")
+        self._speed_actions = {}
+
+        for label, value in [("Slow (0.67x)", 0.67), ("Normal (1x)", 1.0), ("Fast (1.5x)", 1.5)]:
+            act = QAction(label, self._speed_menu)
+            act.setCheckable(True)
+            act.setChecked(value == 1.0)
+            act.triggered.connect(lambda _, v=value: self._set_speed(v))
+            self._speed_menu.addAction(act)
+            self._speed_actions[value] = act
         
         # --- Image saving defaults ---
         act_save_images = QAction("Save popped-up images", self._defaults_menu)
@@ -211,6 +230,14 @@ class TrayManager(QObject):
         self._act_fire_drain = act_fire_drain
         
         menu.addSeparator()
+        
+        act_export = QAction("Export settings...", menu)
+        act_export.triggered.connect(self.export_settings_requested.emit)
+        menu.addAction(act_export)
+
+        act_import = QAction("Import settings...", menu)
+        act_import.triggered.connect(self.import_settings_requested.emit)
+        menu.addAction(act_import)
         
         act_pause = QAction("Pause/Resume session (Ctrl+Alt+F12)", menu)
         act_pause.triggered.connect(self.toggle_session_pause.emit)
@@ -504,6 +531,31 @@ class TrayManager(QObject):
         if not folder:
             return
         self.image_save_dir_changed.emit(folder)
+        
+    def _prompt_image_popup_scale(self) -> None:
+        from ui_settings import get_image_popup_scale
+        current = get_image_popup_scale()
+        val, ok = QInputDialog.getDouble(
+            None,
+            "Image Popup Scale",
+            "Scale factor (0.1 - 1.0, where 1.0 = default):",
+            float(current),
+            0.1,
+            1.0,
+            2,
+        )
+        if not ok:
+            return
+        self.image_popup_scale_changed.emit(float(val))
+        
+    def _set_speed(self, value: float) -> None:
+        for v, act in self._speed_actions.items():
+            act.setChecked(v == value)
+        self.session_speed_changed.emit(value)
+        
+    def set_session_speed_checked(self, value: float) -> None:
+        for v, act in self._speed_actions.items():
+            act.setChecked(v == value)
 
     def set_image_save_enabled_checked(self, enabled: bool) -> None:
         if hasattr(self, "_act_save_images"):

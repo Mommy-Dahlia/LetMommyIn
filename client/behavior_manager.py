@@ -51,7 +51,7 @@ DEFAULT_BEHAVIORS = {
     "bunny_bomb": {
         "audio_and_overlay": False,
     },
-    "allowed_tags": [],\
+    "allowed_tags": [],
     "seen_tags": [],
     "behavior_weights": {},
     "tag_weights": {},
@@ -346,7 +346,7 @@ class BehaviorManager(QObject):
         self._apply_profile_display_settings()
         
     def _apply_profile_display_settings(self) -> None:
-        from ui_settings import set_image_popup_opacity, set_image_click_through, get_image_popup_opacity, get_image_click_through
+        from ui_settings import set_image_popup_opacity, set_session_speed, set_image_popup_scale, set_image_click_through, get_image_popup_opacity, get_image_click_through, set_popup_sfx_path, get_popup_sfx_path
         from pyside_show_image import update_all_image_opacity, update_all_image_click_through
         
         opacity = self._effective_image_popup_opacity()
@@ -358,6 +358,18 @@ class BehaviorManager(QObject):
         if click_through is not None:
             set_image_click_through(click_through)
             update_all_image_click_through()
+            
+        sfx = self._effective_popup_sfx_path()
+        if sfx is not None:
+            set_popup_sfx_path(sfx)
+            
+        scale = self._effective_image_popup_scale()
+        if scale is not None:
+            set_image_popup_scale(scale)
+            
+        speed = self._effective_session_speed()
+        if speed is not None:
+            set_session_speed(speed)
             
     def _replace_pics(self, text: str) -> str:
         if "#PIC" not in text:
@@ -429,7 +441,7 @@ class BehaviorManager(QObject):
             pool = AUTODRAINER_URLS
             if max_item > 0:
                 pool = [(url, cost) for url, cost in pool if cost <= max_item]
-            self._drain_sequence = _generate_drain_sequence(AUTODRAINER_URLS, max_usd)
+            self._drain_sequence = _generate_drain_sequence(pool, max_usd)
             self._drain_index = 0
             self._drain_date = today
             save_drain_state(self._config_dir, self._drain_date, self._drain_index, self._drain_sequence)
@@ -537,6 +549,30 @@ class BehaviorManager(QObject):
                 return bool(profile["image_click_through"])
         return None
     
+    def _effective_popup_sfx_path(self) -> str | None:
+        profile_name = self._behaviors.get("active_profile")
+        if profile_name:
+            profile = self._behaviors.get("profiles", {}).get(profile_name)
+            if profile and "popup_sfx_path" in profile:
+                return profile["popup_sfx_path"]
+        return None
+    
+    def _effective_image_popup_scale(self) -> float | None:
+        profile_name = self._behaviors.get("active_profile")
+        if profile_name:
+            profile = self._behaviors.get("profiles", {}).get(profile_name)
+            if profile and "image_popup_scale" in profile:
+                return float(profile["image_popup_scale"])
+        return None
+    
+    def _effective_session_speed(self) -> float | None:
+        profile_name = self._behaviors.get("active_profile")
+        if profile_name:
+            profile = self._behaviors.get("profiles", {}).get(profile_name)
+            if profile and "session_speed" in profile:
+                return float(profile["session_speed"])
+        return None
+    
     def _fire_general(self) -> None:
         candidates = self._enabled_general_behaviors()
         if not candidates:
@@ -565,7 +601,6 @@ class BehaviorManager(QObject):
 
         offset_ms = 0
         for msg in messages:
-            text = str(msg.get("text", ""))
             text = self._replace_pics(str(msg.get("text", "")))
             delay_s = float(msg.get("delay_seconds", 5))
 

@@ -22,6 +22,9 @@ class AudioManager(QObject):
         self._audio = QAudioOutput()
         self._player = QMediaPlayer()
         self._player.setAudioOutput(self._audio)
+        
+        self._media_devices = QMediaDevices(self)
+        self._media_devices.audioOutputsChanged.connect(self.on_audio_devices_changed)
 
         self._stop_timer: Optional[QTimer] = None
         self.state = AudioState()
@@ -32,36 +35,29 @@ class AudioManager(QObject):
             raise ValueError("audio_play missing url")
 
         # stop any existing audio first
-        self.stop()
+        self.reset()
 
         self._audio.setVolume(max(0.0, min(1.0, float(volume))))
-        self._loop = loop
         self._player.setSource(QUrl(url))
 
-        def _on_status(status):
-            if status == QMediaPlayer.LoadedMedia:
-                if loop and hasattr(self._player, "setLoops"):
-                    self._player.setLoops(QMediaPlayer.Infinite)
-                self._player.play()
-                self._player.mediaStatusChanged.disconnect(_on_status)
-
-        self._player.mediaStatusChanged.connect(_on_status)
+        if loop:
+            try:
+                self._player.setLoops(QMediaPlayer.Infinite)
+            except Exception:
+                pass
+    
+        # Start playback immediately QT should handle asnyc loading the source internally
+        self._player.play()
+        
         self.state.url = url
         self.state.is_playing = True
-
+        
         if duration_s is not None:
-            self._stop_timer = QTimer(self)
-            self._stop_timer.setSingleShot(True)
-            self._stop_timer.timeout.connect(self.stop)
-            self._stop_timer.start(int(float(duration_s) * 1000))
+            self.start_new_timer(duration_s)
 
     def stop(self) -> None:
-        if self._stop_timer is not None:
-            self._stop_timer.stop()
-            self._stop_timer.deleteLater()
-            self._stop_timer = None
-
-        self._player.stop()
+        self.cancel_stop_timer()
+        self.reset()
         self.state = AudioState()
         
     def get_audio_device_choices(self) -> list[tuple[str, str | None]]:
@@ -86,3 +82,30 @@ class AudioManager(QObject):
                 break
         if target is not None:
             self._audio.setDevice(target)
+            
+    def on_audio_devices_changed(self):
+        old_volume = self._audio.volume()
+
+        self._audio = QAudioOutput()
+        self._audio.setVolume(old_volume)
+        self._player.setAudioOutput(self._audio)
+        
+    def reset(self):
+        self._player.stop()
+
+        # Clears media pipeline IMPORTANT
+        self._player.setSource(QUrl())
+        
+    def start_new_timer(self, duration):
+        self.cancel_stop_timer()
+        
+        self._stop_timer = QTimer(self)
+        self._stop_timer.setSingleShot(True)
+        self._stop_timer.timeout.connect(self.stop)
+        self._stop_timer.start(int(float(duration) * 1000))
+        
+    def cancel_stop_timer(self):
+        if self._stop_timer is not None:
+            self._stop_timer.stop()
+            self._stop_timer.deleteLater()
+            self._stop_timer = None

@@ -29,7 +29,10 @@ class AppSettings:
     
     image_popup_opacity: float = 1.0
     image_click_through: bool = False
-
+    
+    image_popup_scale: float = 1.0
+    
+    session_speed: float = 1.0
 
 _SETTINGS = AppSettings()
 
@@ -122,3 +125,21 @@ def set_image_click_through(val: bool) -> None:
 
 def get_image_click_through() -> bool:
     return bool(_SETTINGS.image_click_through)
+
+def set_image_popup_scale(val: float) -> None:
+    try:
+        _SETTINGS.image_popup_scale = max(0.1, min(1.0, float(val)))
+    except Exception:
+        _SETTINGS.image_popup_scale = 1.0
+
+def get_image_popup_scale() -> float:
+    return _SETTINGS.image_popup_scale
+
+def set_session_speed(val: float) -> None:
+    try:
+        _SETTINGS.session_speed = max(0.1, min(3.0, float(val)))
+    except Exception:
+        _SETTINGS.session_speed = 1.0
+
+def get_session_speed() -> float:
+    return _SETTINGS.session_speed

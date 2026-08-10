@@ -5,7 +5,7 @@ from typing import Any, Callable
 from PySide6.QtCore import QObject, QTimer
 import re
 import random
-from ui_settings import get_pet_names
+from ui_settings import get_pet_names, get_session_speed
 from TheFactory import DEFAULT_PACING_S
 import time
 
@@ -14,8 +14,9 @@ _PNS_PATTERN = re.compile(r"#PNS", re.IGNORECASE)
 DEFAULT_SESSION_TIMER_MS = int(DEFAULT_PACING_S * 1000)
 
 def _estimate_duration_s(steps: list[dict]) -> float:
+    speed = get_session_speed()
     return sum(
-        max(0.0, float(s.get("timer_s", DEFAULT_SESSION_TIMER_MS / 1000)))
+        max(0.0, float(s.get("timer_s", DEFAULT_SESSION_TIMER_MS / 1000)) / speed)
         for s in steps
         if isinstance(s, dict)
     )
@@ -171,7 +172,8 @@ class SessionRunner(QObject):
         self._dispatch(step)
 
         try:
-            delay_ms = int(float(timer_s) * 1000)
+            speed = get_session_speed()
+            delay_ms = int(float(timer_s) * 1000 / speed)
         except Exception:
             delay_ms = 0
 

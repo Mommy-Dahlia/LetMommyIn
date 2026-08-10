@@ -1,7 +1,7 @@
 from PySide6.QtCore import Qt, QTimer, QThread, Signal, QObject
 from PySide6.QtWidgets import QApplication, QDialog, QLabel
 from PySide6.QtGui import QPixmap, QScreen, QIcon
-from ui_settings import get_popup_screens, get_image_save_enabled, get_image_save_dir, get_image_popup_opacity, get_image_click_through
+from ui_settings import get_popup_screens, get_image_save_enabled, get_image_save_dir, get_image_popup_opacity, get_image_click_through, get_image_popup_scale
 from pyside_overlay import make_click_through
 import sys
 import os
@@ -120,8 +120,9 @@ class ImagePopup(QDialog):
 
     def _on_loaded(self, pixmap) -> None:
         geom = self._screm.availableGeometry()
-        max_w = int(geom.width() * 0.6)
-        max_h = int(geom.height() * 0.6)
+        scale = get_image_popup_scale()
+        max_w = int(geom.width() * 0.6 * scale)
+        max_h = int(geom.height() * 0.6 * scale)
 
         scaled = pixmap.scaled(
             max_w, max_h,
@@ -165,13 +166,7 @@ class ImagePopup(QDialog):
                 base = f"image_{int(time.time())}_{h}.jpg"
             out_path = out_dir / base
             if out_path.exists():
-                stem = out_path.stem
-                suf = out_path.suffix or ".jpg"
-                for i in range(1, 1000):
-                    cand = out_dir / f"{stem}_{i}{suf}"
-                    if not cand.exists():
-                        out_path = cand
-                        break
+                return
             pixmap.save(str(out_path))
         except Exception:
             pass

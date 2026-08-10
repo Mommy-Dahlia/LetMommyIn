@@ -8,7 +8,7 @@ from PySide6.QtWidgets import (
     QComboBox, QLineEdit, QGridLayout
 )
 from behavior_manager import load_behaviors, save_behaviors, AUTODRAINER_URLS
-from ui_settings import get_image_popup_opacity, get_image_click_through
+from ui_settings import get_image_popup_opacity, get_image_popup_scale, get_image_click_through, get_popup_sfx_path
 
 class NoScrollComboBox(QComboBox):
     def wheelEvent(self, event):
@@ -133,7 +133,7 @@ class BehaviorSettingsDialog(QDialog):
         freq_group = QGroupBox("General Frequency")
         freq_form = QFormLayout(freq_group)
 
-        self._min_minutes = StepSpinBox(min_val=0, max_val=1440,
+        self._min_minutes = StepSpinBox(min_val=1, max_val=1440,
                                     suffix="m",
                                     parent=self)
         self._min_minutes.setValue(self._behaviors["general_frequency"]["min_minutes"])
@@ -436,6 +436,9 @@ class BehaviorSettingsDialog(QDialog):
                 profile["tag_weights"] = tw
                 profile["image_popup_opacity"] = get_image_popup_opacity()
                 profile["image_click_through"] = get_image_click_through()
+                profile["popup_sfx_path"] = get_popup_sfx_path()
+                profile["image_popup_scale"] = get_image_popup_scale()
+                profile["session_speed"] = get_session_speed()
             else:
                 self._behaviors["enabled"] = enabled
                 self._behaviors["general_frequency"] = freq
@@ -512,6 +515,9 @@ class BehaviorSettingsDialog(QDialog):
             "general_frequency": dict(self._behaviors.get("general_frequency", {})),
             "image_popup_opacity": get_image_popup_opacity(),
             "image_click_through": get_image_click_through(),
+            "popup_sfx_path": get_popup_sfx_path(),
+            "image_popup_scale": get_image_popup_scale(),
+            "session_speed": get_session_speed(),
         }
         
         self._profile_combo.addItem(name, name)

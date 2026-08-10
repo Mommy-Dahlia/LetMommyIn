@@ -17,7 +17,7 @@ import re
 import websockets
 import threading
 from PySide6.QtCore import QObject, Signal, QTimer, Qt
-from PySide6.QtWidgets import QApplication, QInputDialog, QMessageBox, QDialog, QVBoxLayout, QLabel, QPushButton
+from PySide6.QtWidgets import QApplication, QLineEdit, QInputDialog, QMessageBox, QDialog, QVBoxLayout, QLabel, QPushButton
 from PySide6.QtGui import QIcon
 if not sys.platform.startswith("linux"):
     from pynput import keyboard
@@ -34,9 +34,9 @@ from wfm_manager import WfmManager
 from tray_manager import TrayManager
 from wallpaper_manager import WallpaperManager
 from ui_settings import (
-    set_popup_screens, set_pet_names, set_default_audio_url, set_default_overlay,
+    set_popup_screens, set_pet_names, set_default_audio_url, set_default_overlay, set_session_speed,
     get_pet_names, get_default_audio_url, get_default_overlay, set_popup_sfx_path,
-    set_image_save_enabled, set_image_save_dir, set_session_receive_mode,
+    set_image_save_enabled, set_image_save_dir, set_session_receive_mode, set_image_popup_scale,
     set_wallpaper_set_cmd, set_wallpaper_get_cmd, set_image_popup_opacity, set_image_click_through
 )
 from session_compiler import SessionCompiler
@@ -47,6 +47,7 @@ from behavior_manager import BehaviorManager, load_behaviors, save_behaviors, lo
 from behavior_settings_dialog import BehaviorSettingsDialog
 from session_customizer import SessionCustomizerDialog
 from onboarding import run_onboarding
+from settings_transfer import export_settings, decode_settings, apply_imported_settings
 
 import ssl
 import certifi
@@ -167,6 +168,8 @@ class ClientConfig:
     wallpaper_get_cmd: str | None = None
     image_popup_opacity: float = 1.0
     onboarding_version: str | None = None
+    image_popup_scale: float = 1.0
+    session_speed: float = 1.0
     
 MANIFEST_PATH = CONFIG_DIR / "catalogue_manifest.json"
 
@@ -957,6 +960,8 @@ def main() -> None:
     set_session_receive_mode(getattr(cfg, "session_receive_mode", "full"))
     set_image_popup_opacity(getattr(cfg, "image_popup_opacity", 1.0))
     set_image_click_through(getattr(cfg, "image_click_through", False))
+    set_image_popup_scale(getattr(cfg, "image_popup_scale", 1.0))
+    set_session_speed(getattr(cfg, "session_speed", 1.0))
     
     if args.server:
         parsed = urlparse(args.server.strip())
@@ -1139,6 +1144,7 @@ def main() -> None:
     tray.audio_device_changed.connect(lambda dev_id: audio_manager.set_output_device_by_id(dev_id))
     tray.set_image_save_enabled_checked(cfg.image_save_enabled)
     tray.set_image_click_through_checked(getattr(cfg, "image_click_through", False))
+    tray.set_session_speed_checked(getattr(cfg, "session_speed", 1.0))
     sync_tray_profile_state()
     
     def run_local_session(session_path: Path) -> None:
@@ -1235,6 +1241,77 @@ def main() -> None:
         close_all_messages()
         stop_gif_overlays()
         
+    def on_session_speed_changed(val: float) -> None:
+        cfg.session_speed = float(val)
+        save_config(cfg)
+        set_session_speed(val)
+        tray.set_session_speed_checked(val)
+        
+    def on_export_settings():
+        try:
+            code = export_settings(cfg, CONFIG_DIR)
+            dlg = QDialog(None)
+            dlg.setWindowTitle("Settings Exported")
+            dlg.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+            layout = QVBoxLayout(dlg)
+            layout.addWidget(QLabel("Copy this code and share it:"))
+            code_field = QLineEdit(code)
+            code_field.setReadOnly(True)
+            code_field.selectAll()
+            layout.addWidget(code_field)
+            btn = QPushButton("OK")
+            btn.clicked.connect(dlg.accept)
+            layout.addWidget(btn)
+            dlg.exec()
+        except Exception as e:
+            QMessageBox.critical(None, "Export failed", str(e))
+    
+    def on_import_settings():
+        code, ok = QInputDialog.getText(None, "Import Settings", "Paste settings code:")
+        if not ok or not code.strip():
+            return
+        try:
+            payload = decode_settings(code.strip())
+        except Exception:
+            QMessageBox.critical(None, "Import failed", "Invalid code.")
+            return
+        
+        export_tier = payload.get("tier", "free")
+        importer_tier = getattr(cfg, "tier", "free")
+        
+        if export_tier == "paid" and importer_tier != "paid":
+            QMessageBox.information(
+                None,
+                "Heads up~",
+                "These settings came from a paid account,\n"
+                "but this device is currently on the free tier.\n\n"
+                "If that seems like a mistake, DM Mommy~"
+            )
+        
+        try:
+            apply_imported_settings(payload, cfg, CONFIG_DIR, save_config)
+        
+            from ui_settings import (set_pet_names, set_popup_screens, set_default_audio_url,
+                                     set_image_popup_opacity, set_image_click_through,
+                                     set_image_popup_scale, set_popup_sfx_path,
+                                     set_session_receive_mode)
+            set_pet_names(cfg.pet_names)
+            set_popup_screens(cfg.popup_screens)
+            set_default_audio_url(cfg.default_audio_url)
+            set_image_popup_opacity(getattr(cfg, "image_popup_opacity", 1.0))
+            set_image_click_through(getattr(cfg, "image_click_through", False))
+            set_image_popup_scale(getattr(cfg, "image_popup_scale", 1.0))
+            set_popup_sfx_path(cfg.popup_sfx_path)
+            set_session_receive_mode(getattr(cfg, "session_receive_mode", "full"))
+            set_session_speed(getattr(cfg, "session_speed", 1.0))
+            
+            behavior_manager.reload()
+            sync_tray_profile_state()
+            
+            QMessageBox.information(None, "Import complete", "Settings imported successfully.")
+        except Exception as e:
+            QMessageBox.critical(None, "Import failed", str(e))
+        
     def open_session_launcher():
         def _on_allowed_changed(new_allowed: list[str]) -> None:
             behaviors = load_behaviors(CONFIG_DIR)
@@ -1296,6 +1373,11 @@ def main() -> None:
         set_image_click_through(cfg.image_click_through)
         tray.set_image_click_through_checked(cfg.image_click_through)
         update_all_image_click_through()
+        
+    def on_image_popup_scale_changed(val: float) -> None:
+        cfg.image_popup_scale = float(val)
+        save_config(cfg)
+        set_image_popup_scale(val)
 
     tray.session_receive_mode_changed.connect(on_session_receive_mode_changed)
 
@@ -1317,7 +1399,11 @@ def main() -> None:
     tray.schedule_toggled.connect(on_schedule_toggled)
     tray.image_click_through_changed.connect(on_image_click_through_changed)
     tray.image_popup_opacity_changed.connect(on_image_popup_opacity_changed)
+    tray.image_popup_scale_changed.connect(on_image_popup_scale_changed)
+    tray.export_settings_requested.connect(on_export_settings)
+    tray.import_settings_requested.connect(on_import_settings)
     tray.clear_screen.connect(on_clear_screen)
+    tray.session_speed_changed.connect(on_session_speed_changed)
 
     tray.fire_next_drain.connect(behavior_manager.trigger_drain) 
 
