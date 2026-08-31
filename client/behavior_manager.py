@@ -12,7 +12,8 @@ from PySide6.QtWidgets import QDialog, QVBoxLayout, QLabel, QPushButton, QHBoxLa
 from session_runner import _apply_pns
 from session_compiler import resource_path
 
-from TheFactory import load_images, assign_images
+from TheFactory import load_hw_images, load_standard_images, replace_pic_in_steps
+from ui_settings import get_hw_mode
 
 BEHAVIORS_VERSION = 2
 
@@ -346,8 +347,10 @@ class BehaviorManager(QObject):
         self._apply_profile_display_settings()
         
     def _apply_profile_display_settings(self) -> None:
-        from ui_settings import set_image_popup_opacity, set_session_speed, set_image_popup_scale, set_image_click_through, get_image_popup_opacity, get_image_click_through, set_popup_sfx_path, get_popup_sfx_path
+        from ui_settings import set_hw_mode, get_hw_mode, set_image_popup_opacity, set_session_speed, set_image_popup_scale, set_image_click_through, get_image_popup_opacity, get_image_click_through, set_popup_sfx_path, get_popup_sfx_path
         from pyside_show_image import update_all_image_opacity, update_all_image_click_through
+        from ui_theme import apply_hw_theme
+        from PySide6.QtWidgets import QApplication
         
         opacity = self._effective_image_popup_opacity()
         if opacity is not None:
@@ -371,23 +374,24 @@ class BehaviorManager(QObject):
         if speed is not None:
             set_session_speed(speed)
             
+        hw = self._effective_hw_mode()
+        if hw is not None:
+            set_hw_mode(hw)
+            apply_hw_theme(QApplication.instance(), hw)
+            
     def _replace_pics(self, text: str) -> str:
         if "#PIC" not in text:
             return text
-        csv_path = None
-        for root in self._content_roots:
-            candidate = root / "images.csv"
-            if candidate.exists():
-                csv_path = candidate
-                break
-        if not csv_path:
-            return text
-        images = load_images(str(csv_path))
-        if not images:
-            return text
         lines = text.split("\n")
-        lines = assign_images(lines, images)
-        return "\n".join(lines)
+        fake_steps = [{"type": "show_message", "body": line} for line in lines]
+        resolved = replace_pic_in_steps(fake_steps, self._content_roots, hw_mode=get_hw_mode())
+        out = []
+        for step in resolved:
+            if step.get("type") == "image_popup":
+                out.append(step["body"])
+            else:
+                out.append(step.get("body", ""))
+        return "\n".join(out)
         
     def _check_schedule(self) -> None:
         if not self._behaviors.get("schedule_enabled"):
@@ -573,6 +577,14 @@ class BehaviorManager(QObject):
                 return float(profile["session_speed"])
         return None
     
+    def _effective_hw_mode(self) -> bool | None:
+        profile_name = self._behaviors.get("active_profile")
+        if profile_name:
+            profile = self._behaviors.get("profiles", {}).get(profile_name)
+            if profile and "hw_mode" in profile:
+                return bool(profile["hw_mode"])
+        return None
+    
     def _fire_general(self) -> None:
         candidates = self._enabled_general_behaviors()
         if not candidates:
@@ -672,17 +684,10 @@ class BehaviorManager(QObject):
         bb_config = self._behaviors.get("bunny_bomb", {})
         audio_and_overlay = bool(bb_config.get("audio_and_overlay", False))
         
-        csv_path = resource_path("content/images.csv")
-            
-        logging.info("BunnyBomb: looking for images.csv at %s", csv_path)
-            
-        try:
-            import TheFactory
-            images = TheFactory.load_images(csv_path)
-            logging.info("BunnyBomb: loaded %d images", len(images))
-        except Exception:
-            logging.warning("BunnyBomb: failed to load images")
-            return
+        if get_hw_mode():
+            images = load_hw_images(self._content_roots)
+        else:
+            images = load_standard_images(self._content_roots)
         
         if not images:
             return
@@ -730,6 +735,7 @@ class BehaviorManager(QObject):
             compiler = SessionCompiler(roots=self._content_roots)
             compiled = compiler.compile_steps(path)
             steps = _apply_client_session_defaults(compiled.steps)
+            steps = replace_pic_in_steps(steps, self._content_roots, hw_mode=get_hw_mode())
             self._session_runner.start(
                 session_id=f"behavior_{stem}",
                 steps=steps,
@@ -820,3 +826,8 @@ class BehaviorManager(QObject):
     def trigger_next_event(self) -> None:
         self._fire_general()
 
+    def set_schedule_enabled(self, enabled: bool) -> None:
+        self._behaviors["schedule_enabled"] = bool(enabled)
+        save_behaviors(self._config_dir, self._behaviors)
+        if enabled:
+            self._check_schedule()

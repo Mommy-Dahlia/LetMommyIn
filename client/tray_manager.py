@@ -51,6 +51,7 @@ class TrayManager(QObject):
     export_settings_requested = Signal()
     import_settings_requested = Signal()
     clear_screen = Signal()
+    hw_mode_changed = Signal(object)
 
     def __init__(
         self,
@@ -215,10 +216,19 @@ class TrayManager(QObject):
         
         self._profile_menu = self._premium_menu.addMenu("Active profile")
         self._rebuild_profile_menu()
+        
+        act_hw_mode = QAction("HW Mode", menu)
+        act_hw_mode.setCheckable(True)
+        act_hw_mode.setChecked(False)
+        act_hw_mode.setEnabled(False)
+        act_hw_mode.triggered.connect(lambda checked: self.hw_mode_changed.emit(bool(checked)))
+        self._act_hw_mode = act_hw_mode
+        self._premium_menu.addAction(act_hw_mode)
 
-        act_schedule_toggle = QAction("Schedule enabled", menu)
+        act_schedule_toggle = QAction("Schedule Mode", menu)
         act_schedule_toggle.setCheckable(True)
         act_schedule_toggle.setChecked(False)
+        act_schedule_toggle.setEnabled(False)
         act_schedule_toggle.triggered.connect(lambda checked: self.schedule_toggled.emit(bool(checked)))
         self._act_schedule_toggle = act_schedule_toggle
         self._premium_menu.addAction(act_schedule_toggle)
@@ -281,6 +291,10 @@ class TrayManager(QObject):
         if hrs > 0:
             return f"{hrs}h {mins:02d}m"
         return f"{mins}m"
+    
+    def set_hw_mode_checked(self, enabled: bool) -> None:
+        if hasattr(self, "_act_hw_mode"):
+            self._act_hw_mode.setChecked(bool(enabled))
 
     def refresh_icon(self) -> None:
         # default status text
@@ -659,3 +673,6 @@ class TrayManager(QObject):
 
         if hasattr(self, "_act_schedule_toggle"):
             self._act_schedule_toggle.setEnabled(paid)
+            
+        if hasattr(self, "_act_hw_mode"):
+            self._act_hw_mode.setEnabled(paid)

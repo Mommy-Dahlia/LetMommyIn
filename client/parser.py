@@ -4,12 +4,13 @@ from pyside_overlay import show_gif_overlay, stop_gif_overlays
 from audio_manager import AudioManager
 from subliminal_manager import SubliminalManager
 from wfm_manager import WfmManager
-from ui_settings import get_popup_screens, get_default_audio_url, get_default_overlay, get_popup_sfx_path, get_session_receive_mode
+from ui_settings import get_hw_mode, get_popup_screens, get_default_audio_url, get_default_overlay, get_popup_sfx_path, get_session_receive_mode
 from pyside_session_warning import run_session_warning_dialog
 from PySide6.QtCore import QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtMultimedia import QSoundEffect
 from session_runner import _apply_pns, _estimate_duration_s
+from TheFactory import replace_pic_in_steps
 import os
 
 def _popup_delay():
@@ -60,6 +61,12 @@ def _get_sfx() -> QSoundEffect | None:
         _SFX = QSoundEffect()
         _SFX.setVolume(0.6)  # tweak as desired
     return _SFX
+
+_CONTENT_ROOTS = None
+
+def set_content_roots(roots):
+    global _CONTENT_ROOTS
+    _CONTENT_ROOTS = roots
 
 def play_popup_sfx() -> None:
     path = get_popup_sfx_path()
@@ -277,6 +284,8 @@ def parse_command(data):
 
             # Apply defaults only if we're actually starting
             steps = _apply_client_session_defaults(steps)
+            if _CONTENT_ROOTS:
+                steps = replace_pic_in_steps(steps, _CONTENT_ROOTS, hw_mode=get_hw_mode())
             _SESSION_RUNNER.start(session_id, steps)
             _popup_delay()
         case "write_for_me":

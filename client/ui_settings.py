@@ -27,6 +27,8 @@ class AppSettings:
     
     session_receive_mode: str = "full"  # "full" | "minimal" | "off"
     
+    hw_mode: bool = False
+    
     image_popup_opacity: float = 1.0
     image_click_through: bool = False
     
@@ -56,6 +58,12 @@ def set_default_audio_url(url: str | None) -> None:
 
 def get_default_audio_url() -> str | None:
     return _SETTINGS.default_audio_url
+
+def set_hw_mode(val: bool) -> None:
+    _SETTINGS.hw_mode = bool(val)
+
+def get_hw_mode() -> bool:
+    return bool(_SETTINGS.hw_mode)
 
 # --- overlay defaults ---
 def set_default_overlay(url: str | None, *, opacity: float = 1.0, screen: int = -1) -> None:

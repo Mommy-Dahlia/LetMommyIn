@@ -33,6 +33,7 @@ def build_mommy_profile(tier: str = "free") -> dict:
             "popup_sfx_path": None,
             "image_popup_scale": 1.0,
             "session_speed": 1.0,
+            "hw_mode": False,
         }
     else:
         return {
@@ -57,6 +58,7 @@ def build_mommy_profile(tier: str = "free") -> dict:
             "popup_sfx_path": None,
             "image_popup_scale": 1.0,
             "session_speed": 1.0,
+            "hw_mode": False,
         }
 
 def build_work_profile(work_start_h: int = 9, work_end_h: int = 17) -> dict:
@@ -83,6 +85,7 @@ def build_work_profile(work_start_h: int = 9, work_end_h: int = 17) -> dict:
         "popup_sfx_path": None,
         "image_popup_scale": 1.0,
         "session_speed": 1.0,
+        "hw_mode": False,
     }
 
 def build_work_schedule(work_start_h: int = 9, work_end_h: int = 17, main_profile: str = "Onboarding") -> list:

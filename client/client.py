@@ -22,7 +22,7 @@ from PySide6.QtGui import QIcon
 if not sys.platform.startswith("linux"):
     from pynput import keyboard
 
-from parser import parse_command, _apply_client_session_defaults, set_session_runner, set_audio_manager, set_subliminal_manager, set_wfm_manager, set_ack_queue, set_injection_handler
+from parser import set_content_roots, parse_command, _apply_client_session_defaults, set_session_runner, set_audio_manager, set_subliminal_manager, set_wfm_manager, set_ack_queue, set_injection_handler
 from pyside_show_message import close_all_messages
 from pyside_show_image import close_all_images, update_all_image_opacity, update_all_image_click_through
 from pyside_show_writeforme import close_all_wfm
@@ -37,17 +37,19 @@ from ui_settings import (
     set_popup_screens, set_pet_names, set_default_audio_url, set_default_overlay, set_session_speed,
     get_pet_names, get_default_audio_url, get_default_overlay, set_popup_sfx_path,
     set_image_save_enabled, set_image_save_dir, set_session_receive_mode, set_image_popup_scale,
-    set_wallpaper_set_cmd, set_wallpaper_get_cmd, set_image_popup_opacity, set_image_click_through
+    set_wallpaper_set_cmd, set_wallpaper_get_cmd, set_image_popup_opacity, set_image_click_through,
+    set_hw_mode, get_hw_mode
 )
 from session_compiler import SessionCompiler
 from session_launcher import SessionLauncherDialog
-from ui_theme import apply_app_theme
+from ui_theme import apply_app_theme, apply_hw_theme
 from pyside_injection_summary import InjectionBatchNotifier, InjectEvent
 from behavior_manager import BehaviorManager, load_behaviors, save_behaviors, load_content_pool
 from behavior_settings_dialog import BehaviorSettingsDialog
 from session_customizer import SessionCustomizerDialog
 from onboarding import run_onboarding
 from settings_transfer import export_settings, decode_settings, apply_imported_settings
+from TheFactory import replace_pic_in_steps
 
 import ssl
 import certifi
@@ -170,6 +172,7 @@ class ClientConfig:
     onboarding_version: str | None = None
     image_popup_scale: float = 1.0
     session_speed: float = 1.0
+    hw_mode: bool = False
     
 MANIFEST_PATH = CONFIG_DIR / "catalogue_manifest.json"
 
@@ -962,6 +965,9 @@ def main() -> None:
     set_image_click_through(getattr(cfg, "image_click_through", False))
     set_image_popup_scale(getattr(cfg, "image_popup_scale", 1.0))
     set_session_speed(getattr(cfg, "session_speed", 1.0))
+    set_hw_mode(getattr(cfg, "hw_mode", False))
+    if getattr(cfg, "hw_mode", False):
+        apply_hw_theme(app, True)
     
     if args.server:
         parsed = urlparse(args.server.strip())
@@ -985,6 +991,7 @@ def main() -> None:
     set_ack_queue(ack_queue)
     dispatcher = CommandDispatcher(ack_queue)
     content_roots = get_content_roots(CONFIG_DIR)
+    set_content_roots(content_roots)
 
     session_runner = SessionRunner(dispatcher.handle_command)
     set_session_runner(session_runner)
@@ -1145,6 +1152,7 @@ def main() -> None:
     tray.set_image_save_enabled_checked(cfg.image_save_enabled)
     tray.set_image_click_through_checked(getattr(cfg, "image_click_through", False))
     tray.set_session_speed_checked(getattr(cfg, "session_speed", 1.0))
+    tray.set_hw_mode_checked(getattr(cfg, "hw_mode", False))
     sync_tray_profile_state()
     
     def run_local_session(session_path: Path) -> None:
@@ -1154,6 +1162,7 @@ def main() -> None:
             logging.info("Running local session=%s chosen_blocks=%s", compiled.name, compiled.chosen_blocks)
 
             steps = _apply_client_session_defaults(compiled.steps)
+            steps = replace_pic_in_steps(steps, content_roots, hw_mode=get_hw_mode())
             session_runner.start(
                 session_id=f"local_{compiled.name}",
                 steps=steps,
@@ -1219,15 +1228,11 @@ def main() -> None:
         
     def on_profile_selected(profile_name):
         behavior_manager._behaviors["schedule_enabled"] = False
-        save_behaviors(CONFIG_DIR, behavior_manager._behaviors)
         behavior_manager.set_active_profile(profile_name)
         sync_tray_profile_state()
     
     def on_schedule_toggled(enabled):
-        behavior_manager._behaviors["schedule_enabled"] = bool(enabled)
-        save_behaviors(CONFIG_DIR, behavior_manager._behaviors)
-        if enabled:
-            behavior_manager._check_schedule()
+        behavior_manager.set_schedule_enabled(bool(enabled))
         sync_tray_profile_state()
         
     def on_image_popup_opacity_changed(val: float) -> None:
@@ -1235,6 +1240,13 @@ def main() -> None:
         save_config(cfg)
         set_image_popup_opacity(val)
         update_all_image_opacity()
+        
+    def on_hw_mode_changed(enabled: bool) -> None:
+        cfg.hw_mode = bool(enabled)
+        save_config(cfg)
+        set_hw_mode(cfg.hw_mode)
+        tray.set_hw_mode_checked(cfg.hw_mode)
+        apply_hw_theme(app, cfg.hw_mode)
         
     def on_clear_screen():
         close_all_images()
@@ -1314,10 +1326,8 @@ def main() -> None:
         
     def open_session_launcher():
         def _on_allowed_changed(new_allowed: list[str]) -> None:
-            behaviors = load_behaviors(CONFIG_DIR)
-            behaviors["session"]["allowed_sessions"] = new_allowed
-            save_behaviors(CONFIG_DIR, behaviors)
-            behavior_manager.update_behaviors(behaviors)
+            behavior_manager._behaviors["session"]["allowed_sessions"] = new_allowed
+            save_behaviors(CONFIG_DIR, behavior_manager._behaviors)
         
         dlg = SessionLauncherDialog(
             content_roots=content_roots,
@@ -1352,7 +1362,29 @@ def main() -> None:
                 parent=None,
                 tier=getattr(cfg, "tier", "free"),
             )
-            dlg.behaviors_changed.connect(behavior_manager.update_behaviors)
+            def apply_behavior_dialog_changes(dialog_behaviors: dict):
+                live = behavior_manager._behaviors
+
+                live["active_time"] = dialog_behaviors["active_time"]
+                live["allowed_tags"] = dialog_behaviors["allowed_tags"]
+                live["bunny_bomb"] = dialog_behaviors["bunny_bomb"]
+                live["autodrainer"] = dialog_behaviors["autodrainer"]
+                live["schedule_enabled"] = dialog_behaviors.get("schedule_enabled", live.get("schedule_enabled"))
+                live["schedule"] = dialog_behaviors.get("schedule", live.get("schedule"))
+                live["profiles"] = dialog_behaviors.get("profiles", live.get("profiles", {}))
+                live["active_profile"] = dialog_behaviors.get("active_profile", live.get("active_profile"))
+                live["enabled"] = dialog_behaviors["enabled"]
+                live["behavior_weights"] = dialog_behaviors.get("behavior_weights", {})
+                live["tag_weights"] = dialog_behaviors.get("tag_weights", {})
+                live["general_frequency"] = dialog_behaviors["general_frequency"]
+
+                save_behaviors(CONFIG_DIR, live)
+                behavior_manager._behaviors = live
+                behavior_manager._schedule_general()
+                behavior_manager._schedule_autodrainer()
+                behavior_manager._apply_profile_display_settings()
+
+            dlg.behaviors_changed.connect(apply_behavior_dialog_changes)
             dlg.behaviors_changed.connect(lambda _: sync_tray_profile_state())
             dlg.exec()
         except Exception as e:
@@ -1404,6 +1436,7 @@ def main() -> None:
     tray.import_settings_requested.connect(on_import_settings)
     tray.clear_screen.connect(on_clear_screen)
     tray.session_speed_changed.connect(on_session_speed_changed)
+    tray.hw_mode_changed.connect(on_hw_mode_changed)
 
     tray.fire_next_drain.connect(behavior_manager.trigger_drain) 
 

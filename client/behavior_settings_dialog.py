@@ -8,7 +8,7 @@ from PySide6.QtWidgets import (
     QComboBox, QLineEdit, QGridLayout
 )
 from behavior_manager import load_behaviors, save_behaviors, AUTODRAINER_URLS
-from ui_settings import get_image_popup_opacity, get_image_popup_scale, get_image_click_through, get_popup_sfx_path
+from ui_settings import get_image_popup_opacity, get_image_popup_scale, get_image_click_through, get_popup_sfx_path, get_session_speed, get_hw_mode
 
 class NoScrollComboBox(QComboBox):
     def wheelEvent(self, event):
@@ -439,6 +439,7 @@ class BehaviorSettingsDialog(QDialog):
                 profile["popup_sfx_path"] = get_popup_sfx_path()
                 profile["image_popup_scale"] = get_image_popup_scale()
                 profile["session_speed"] = get_session_speed()
+                profile["hw_mode"] = get_hw_mode()
             else:
                 self._behaviors["enabled"] = enabled
                 self._behaviors["general_frequency"] = freq
@@ -518,6 +519,7 @@ class BehaviorSettingsDialog(QDialog):
             "popup_sfx_path": get_popup_sfx_path(),
             "image_popup_scale": get_image_popup_scale(),
             "session_speed": get_session_speed(),
+            "hw_mode": get_hw_mode()
         }
         
         self._profile_combo.addItem(name, name)

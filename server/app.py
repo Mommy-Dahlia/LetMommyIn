@@ -463,9 +463,7 @@ def compile_plan_to_steps(plan: dict) -> tuple[list[dict], list[str]]:
 
         raise ValueError(f"unknown plan item keys: {list(item.keys())}")
 
-    images = TheFactory.load_images("images.csv")
     lines, delays = TheFactory.extract_delays(out_lines)
-    lines = TheFactory.assign_images(lines, images)
     steps = TheFactory.wrap_output(lines, delays)
     TheFactory.ensure_timer_s_everywhere(steps)
     steps = TheFactory.apply_effect_scoping(steps)
@@ -480,9 +478,7 @@ def compile_script_to_steps(script_text: str) -> list[dict]:
     text = normalize_newlines(script_text or "")
     lines = text.splitlines()
 
-    images = TheFactory.load_images("images.csv")
     lines, delays = TheFactory.extract_delays(lines)
-    lines = TheFactory.assign_images(lines, images)
     steps = TheFactory.wrap_output(lines, delays)
     TheFactory.ensure_timer_s_everywhere(steps)
     steps = TheFactory.apply_effect_scoping(steps)
