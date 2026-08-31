@@ -13,6 +13,8 @@ from session_runner import _apply_pns, _estimate_duration_s
 from TheFactory import replace_pic_in_steps
 import os
 
+HW_DEFGIF = "https://pub-6dd573008dee4009bea8855056470713.r2.dev/OMD/Hadeswhore/hw.gif"
+
 def _popup_delay():
     from time import sleep
     sleep(0.25)  # 80ms buffer
@@ -100,7 +102,11 @@ def _apply_client_session_defaults(steps: list[dict]) -> list[dict]:
     out = [dict(s) if isinstance(s, dict) else s for s in steps]
 
     # ---- Overlay default ----
-    overlay_url, overlay_opacity, overlay_screen = get_default_overlay()
+    if get_hw_mode():
+        overlay_url = HW_DEFGIF
+        overlay_opacity, overlay_screen = get_default_overlay()[1:]
+    else:
+        overlay_url, overlay_opacity, overlay_screen = get_default_overlay()
     if overlay_url:
         has_overlay_any = any(s.get("type") in ("gif_overlay", "gif_overlay_stop") for s in out if isinstance(s, dict))
         if not has_overlay_any:

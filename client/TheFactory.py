@@ -216,6 +216,35 @@ def load_script(txt_path):
     """Load all lines from the .txt script file."""
     with open(txt_path, "r", encoding="utf-8") as f:
         return [line.rstrip("\n") for line in f]
+    
+def extract_delays(script_lines):
+    """
+    For each line, detect trailing '#N' and:
+      - remove it from the line
+      - store delay = N * 1000
+
+    Returns:
+      cleaned_lines: list[str]   (with '#N' removed)
+      delays:     list[int]   (same length, per-line delay)
+    """
+    cleaned_lines = []
+    delays = []
+
+    delay_pattern = re.compile(r"(.*?)(?:\s*#(\d+))\s*$")
+
+    for line in script_lines:
+        m = delay_pattern.match(line)
+        if m:
+            text = m.group(1).rstrip()
+            delay = int(m.group(2))
+        else:
+            text = line
+            delay = None
+
+        cleaned_lines.append(text)
+        delays.append(delay)
+
+    return cleaned_lines, delays
 
 
 def extract_pic_tags(line):

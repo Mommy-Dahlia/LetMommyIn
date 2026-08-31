@@ -74,7 +74,7 @@ QMenu::item:selected {
 HW_THEME_QSS = """
 QWidget {
     background-color: #0a0a0a;
-    color: #cc0000;
+    color: #ff1a1a;
     font-size: 12px;
 }
 QDialog {
@@ -82,8 +82,8 @@ QDialog {
 }
 QPushButton {
     background-color: #1a1a1a;
-    color: #cc0000;
-    border: 1px solid #cc0000;
+    color: #ff1a1a;
+    border: 1px solid #ff1a1a;
     padding: 6px 10px;
     border-radius: 8px;
 }
@@ -92,13 +92,13 @@ QPushButton:hover {
 }
 QLineEdit, QTextEdit, QPlainTextEdit, QSpinBox, QDoubleSpinBox, QComboBox {
     background-color: #1a1a1a;
-    color: #cc0000;
+    color: #ff1a1a;
     border: 2px solid #330000;
     padding: 6px;
     border-radius: 8px;
 }
 QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus {
-    border: 2px solid #cc0000;
+    border: 2px solid #ff1a1a;
 }
 QListWidget, QTreeWidget, QTableWidget {
     background-color: #1a1a1a;
@@ -111,8 +111,8 @@ QListWidget::item:selected {
 }
 QMenu {
     background-color: #0a0a0a;
-    color: #cc0000;
-    border: 1px solid #cc0000;
+    color: #ff1a1a;
+    border: 1px solid #ff1a1a;
 }
 QMenu::item {
     padding: 6px 18px;
