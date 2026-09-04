@@ -1,16 +1,19 @@
 <!doctype html>
-<script src="https://unpkg.com/htmx.org@1.9.12"></script>
 <html>
-  <p>
-    <a href="/admin/blocks/page">Manage Blocks</a> |
-    <a href="/sessions">Sessions (Mixer)</a> |
-    <a href="/admin/behaviors/page">Behaviors</a>
-  </p>
   <head>
     <meta charset="utf-8" />
     <title>Devices</title>
+    <script src="https://unpkg.com/htmx.org@1.9.12"></script>
     <link rel="stylesheet" href="/static/admin.css">
   </head>
+  <body>
+    <p>
+      <a href="/">Devices</a> |
+      <a href="/admin/blocks/page">Blocks</a> |
+      <a href="/admin/sessions">Sessions</a> |
+      <a href="/admin/behaviors/page">Behaviors</a> |
+      <a href="/admin/affirmations/page">Affirmations</a>
+    </p>
   <body>
     <h2>Broadcast injection</h2>
 
@@ -75,7 +78,6 @@
           <th>Send Saved Session</th>
           <th>Inject Block</th>
           <th>Inject Session</th>
-	  <th>Session</th>
         </tr>
       </thead>
       <tbody>
@@ -122,14 +124,7 @@
             <button type="submit">Inject</button>
           </form>
           <div id="send-result-{{ d.device_id }}" style="margin-top:6px; font-size: 0.9em;"></div>
-        </td>
-        <td>
-          <div id="sess-{{ d.device_id }}"
-            hx-get="/device/{{ d.device_id }}/session_progress"
-            hx-trigger="load, every 5s"
-            hx-swap="innerHTML">
-          </div>
-        </td>
+          </td>
         </tr>
         {% endfor %}
       </tbody>

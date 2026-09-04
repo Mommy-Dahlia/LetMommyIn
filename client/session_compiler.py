@@ -127,13 +127,6 @@ class SessionCompiler:
         # 1) per-line delays (#N), remove the suffix
         lines, delays = TheFactory.extract_delays(raw_lines)
 
-        # 2) #PIC replacement (always use bundled images.csv if present)
-        csv_path = self._find_first("images.csv")
-        logging.info("Session: looking for images.csv at %s", csv_path)
-        if csv_path:
-            images = TheFactory.load_images(str(csv_path))
-            lines = TheFactory.assign_images(lines, images)
-
         # 3) wrap to commands
         steps = TheFactory.wrap_output(lines, delays)
 

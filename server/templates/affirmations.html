@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Affirmations – Admin</title>
+    <script src="https://unpkg.com/htmx.org@1.9.12"></script>
+    <link rel="stylesheet" href="/static/admin.css">
+</head>
+<body>
+    <p>
+      <a href="/">Devices</a> |
+      <a href="/admin/blocks/page">Blocks</a> |
+      <a href="/admin/sessions">Sessions</a> |
+      <a href="/admin/behaviors/page">Behaviors</a> |
+      <a href="/admin/affirmations/page">Affirmations</a>
+    </p>
+
+    <h2>Affirmations</h2>
+    <p class="muted">Last updated: {{ updated_at }}</p>
+
+    <div class="card">
+        <form id="affForm">
+            <textarea name="body" rows="20">{{ affirmations_text }}</textarea>
+            <br>
+            <button type="submit">Save</button>
+        </form>
+
+        <div id="result" style="margin-top:12px; display:none; padding:8px; border-radius:10px;"></div>
+    </div>
+
+    <script>
+        document.getElementById('affForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const form = new FormData(e.target);
+            const res = await fetch('/admin/affirmations/save', {
+                method: 'POST',
+                body: form,
+            });
+            const text = await res.text();
+            const el = document.getElementById('result');
+            el.textContent = text;
+            el.style.display = 'block';
+            el.style.background = res.ok ? '#d4edda' : '#f8d7da';
+        });
+    </script>
+</body>
+</html>

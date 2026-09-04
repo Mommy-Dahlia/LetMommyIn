@@ -18,9 +18,11 @@
   </head>
   <body>
     <p>
-      <a href="/">← Devices</a> |
+      <a href="/">Devices</a> |
       <a href="/admin/blocks/page">Blocks</a> |
-      <a href="/sessions">Sessions</a>
+      <a href="/admin/sessions">Sessions</a> |
+      <a href="/admin/behaviors/page">Behaviors</a> |
+      <a href="/admin/affirmations/page">Affirmations</a>
     </p>
 
     <h1>Sessions (Mixer + Save)</h1>
@@ -32,7 +34,7 @@
         <ul>
           {% for s in sessions %}
             <li>
-              <a href="/sessions?load={{ s.title }}">{{ s.title }}</a>
+              <a href="/admin/sessions?load={{ s.title }}">{{ s.title }}</a>
               <div class="muted">{{ s.summary }}</div>
             </li>
           {% endfor %}
@@ -73,7 +75,7 @@
       <div>
         <form
           id="saveForm"
-          hx-post="/sessions/save"
+          hx-post="/admin/sessions/save"
           hx-target="#result"
           hx-swap="innerHTML"
         >
@@ -131,7 +133,7 @@
           <div class="row" style="margin-top: 8px;">
             <button
               type="button"
-              hx-post="/sessions/preview"
+              hx-post="/admin/sessions/preview"
               hx-include="#plan_json"
               hx-target="#preview"
               hx-swap="innerHTML"

@@ -375,6 +375,24 @@ def list_blocks() -> list[dict]:
         })
     return out
 
+AFFIRMATIONS_PATH = Path("affirmations.json")
+AFFIRMATIONS_API_KEY = "000HBABYBABYITSINSPIRINGC0MMANDER"  # swap for a real secret
+
+def load_affirmations() -> tuple[list[str], int]:
+    """Returns (list_of_strings, updated_at_unix)."""
+    if not AFFIRMATIONS_PATH.exists():
+        return [], 0
+    with open(AFFIRMATIONS_PATH, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    return data.get("affirmations", []), data.get("updated_at", 0)
+
+def save_affirmations(lines: list[str]) -> int:
+    """Writes the list and stamps updated_at. Returns the timestamp."""
+    now = int(time.time())
+    with open(AFFIRMATIONS_PATH, "w", encoding="utf-8") as f:
+        json.dump({"affirmations": lines, "updated_at": now}, f, ensure_ascii=False, indent=2)
+    return now
+
 def load_session_plan(title: str) -> dict:
     with sqlite3.connect(DB_PATH) as conn:
         row = conn.execute("SELECT plan_json FROM sessions WHERE title = ?", (title,)).fetchone()
@@ -907,6 +925,26 @@ def catalogue_get_behavior_entry(name: str, behavior_type: str) -> dict | None:
         "tags": _json_loads(row[4]) or [],
         "updated_at": row[5],
     }
+
+@admin_router.get("/affirmations/page", response_class=HTMLResponse)
+def affirmations_page(request: Request):
+    affs, updated_at = load_affirmations()
+    return templates.TemplateResponse(
+        "affirmations.html",
+        {
+            "request": request,
+            "affirmations_text": "\n".join(affs),
+            "updated_at": fmt_unix_et(updated_at) if updated_at else "never",
+        },
+    )
+
+@admin_router.post("/affirmations/save")
+def affirmations_save(body: str = Form(...)):
+    lines = [line.strip() for line in body.splitlines() if line.strip()]
+    if not lines:
+        return PlainTextResponse("at least one affirmation is required", status_code=400)
+    ts = save_affirmations(lines)
+    return PlainTextResponse(f"Saved {len(lines)} affirmations at {fmt_unix_et(ts)}")
 
 @admin_router.post("/enroll/create")
 def admin_create_enroll_code(ttl_minutes: int = 15):
@@ -1495,6 +1533,14 @@ def require_paid(device_id: str) -> None:
 def health():
     return {"ok": True, "ts": time.time()}
 
+@app.get("/affirmations")
+def get_affirmations(request: Request):
+    key = request.headers.get("X-API-Key", "")
+    if key != AFFIRMATIONS_API_KEY:
+        raise HTTPException(status_code=401, detail="invalid api key")
+    affs, updated_at = load_affirmations()
+    return JSONResponse({"affirmations": affs, "updated_at": updated_at})
+
 @dataclass
 class DeviceInfo:
     device_id: str
@@ -1710,7 +1756,7 @@ def index(request: Request):
     devices.sort(key=lambda x: (not x["online"], -x["last_seen_ts"]))
     return templates.TemplateResponse("index.html", {"request": request, "devices": devices, "sessions": list_sessions(), "blocks": list_blocks()})
 
-@app.get("/sessions", response_class=HTMLResponse)
+@admin_router.get("/sessions", response_class=HTMLResponse)
 def sessions_page(request: Request, load: str = ""):
     sessions = list_sessions()
     blocks = list_blocks()
@@ -1754,7 +1800,7 @@ def blocks_page(request: Request):
         {"request": request, "blocks": list_blocks()},
     )
 
-@app.post("/sessions/preview")
+@admin_router.post("/sessions/preview")
 def sessions_preview(plan_json: str = Form(...)):
     try:
         plan_obj = json.loads(plan_json)
@@ -1777,7 +1823,7 @@ def sessions_preview(plan_json: str = Form(...)):
         + json.dumps(steps[:10], indent=2, ensure_ascii=False)
     )
 
-@app.post("/sessions/save")
+@admin_router.post("/sessions/save")
 def sessions_save(
     title: str = Form(...),
     summary: str = Form(""),

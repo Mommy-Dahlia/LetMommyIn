@@ -1,15 +1,19 @@
 <!doctype html>
-<script src="https://unpkg.com/htmx.org@1.9.12"></script>
 <html>
-  <p>
-    <a href="/admin/blocks/page">Manage Blocks</a> |
-    <a href="/sessions">Sessions (Mixer)</a>
-  </p>
   <head>
     <meta charset="utf-8" />
     <title>Devices</title>
+    <script src="https://unpkg.com/htmx.org@1.9.12"></script>
     <link rel="stylesheet" href="/static/admin.css">
   </head>
+  <body>
+    <p>
+      <a href="/">Devices</a> |
+      <a href="/admin/blocks/page">Blocks</a> |
+      <a href="/sessions">Sessions</a> |
+      <a href="/admin/behaviors/page">Behaviors</a> |
+      <a href="/admin/affirmations/page">Affirmations</a>
+    </p>
   <body>
     <h2>Broadcast injection</h2>
 
