@@ -38,6 +38,8 @@ _ET = ZoneInfo("America/New_York")
 PROTOCOL_VERSION = "v0.3"
 MAX_LOG_EVENTS = 1000
 
+from starlette.middleware.cors import CORSMiddleware
+
 def fmt_unix_et(ts: int | float | str | None) -> str:
     """
     Convert unix seconds -> US Eastern time string.
@@ -167,6 +169,12 @@ DB_PATH = "lmi.db"
 init_db()
 
 app = FastAPI(title="Command Hub PoC")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["https://affirmations.letmommyin.com"],
+    allow_methods=["GET"],
+    allow_headers=["X-API-Key"],
+)
 admin_router = APIRouter(prefix="/admin")
 
 templates = Jinja2Templates(directory="templates")
