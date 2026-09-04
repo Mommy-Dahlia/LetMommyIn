@@ -1424,6 +1424,105 @@ def load_behavior_entry(name: str, behavior_type: str):
         return PlainTextResponse("not found", status_code=404)
     return JSONResponse(entry)
 
+@admin_router.get("/sessions", response_class=HTMLResponse)
+def sessions_page(request: Request, load: str = ""):
+    sessions = list_sessions()
+    blocks = list_blocks()
+
+    loaded = {
+        "title": "",
+        "summary": "",
+        "tags": "",
+        "intensity": "",
+        "plan_json": json.dumps({"plan": []}, indent=2, ensure_ascii=False),
+    }
+
+    if load.strip():
+        try:
+            plan = load_session_plan(load.strip())
+            loaded["title"] = load.strip()
+            loaded["plan_json"] = json.dumps(plan, indent=2, ensure_ascii=False)
+
+            meta = next((s for s in sessions if s["title"] == loaded["title"]), None)
+            if meta:
+                loaded["summary"] = meta.get("summary") or ""
+                loaded["tags"] = ", ".join(meta.get("tags") or [])
+                loaded["intensity"] = "" if meta.get("intensity") is None else str(meta["intensity"])
+        except Exception:
+            pass
+
+    return templates.TemplateResponse(
+        "sessions.html",
+        {
+            "request": request,
+            "sessions": sessions,
+            "blocks": blocks,
+            "loaded": loaded,
+        },
+    )
+
+@admin_router.post("/sessions/save")
+def sessions_save(
+    title: str = Form(...),
+    summary: str = Form(""),
+    tags: str = Form(""),
+    intensity: str = Form(""),
+    plan_json: str = Form(...),
+    overwrite: str = Form("0"),
+):
+    overwrite_flag = overwrite.strip().lower() in ("1", "true", "yes", "on")
+
+    try:
+        plan_obj = json.loads(plan_json)
+    except Exception as e:
+        return PlainTextResponse(f"Invalid JSON: {e}", status_code=400)
+
+    try:
+        computed_tags, computed_intensity = compute_session_meta_from_plan(plan_obj)
+    except KeyError as e:
+        return PlainTextResponse(str(e), status_code=404)
+    except Exception as e:
+        return PlainTextResponse(f"Meta compute failed: {e}", status_code=400)
+
+    try:
+        upsert_session(
+            title=title,
+            summary=summary,
+            tags=computed_tags,
+            intensity=computed_intensity,
+            plan=plan_obj,
+            overwrite=overwrite_flag,
+        )
+    except HTTPException as e:
+        return PlainTextResponse(str(e.detail), status_code=e.status_code)
+    except Exception as e:
+        return PlainTextResponse(f"Save failed: {e}", status_code=400)
+
+    return PlainTextResponse(f"Saved session: {title}")
+
+@admin_router.post("/sessions/preview")
+def sessions_preview(plan_json: str = Form(...)):
+    try:
+        plan_obj = json.loads(plan_json)
+    except Exception as e:
+        return PlainTextResponse(f"Invalid JSON: {e}", status_code=400)
+
+    try:
+        steps, chosen_blocks = compile_plan_to_steps(plan_obj)
+    except KeyError as e:
+        return PlainTextResponse(str(e), status_code=404)
+    except Exception as e:
+        return PlainTextResponse(f"Compile failed: {e}", status_code=400)
+
+    return PlainTextResponse(
+        "OK\n"
+        f"steps={len(steps)}\n"
+        f"blocks_used={len(chosen_blocks)}\n"
+        f"first_blocks={chosen_blocks[:8]}\n\n"
+        "first_10_steps:\n"
+        + json.dumps(steps[:10], indent=2, ensure_ascii=False)
+    )
+
 app.include_router(admin_router)
 
 def consume_enroll_code(raw_code: str) -> bool:
@@ -1764,111 +1863,12 @@ def index(request: Request):
     devices.sort(key=lambda x: (not x["online"], -x["last_seen_ts"]))
     return templates.TemplateResponse("index.html", {"request": request, "devices": devices, "sessions": list_sessions(), "blocks": list_blocks()})
 
-@admin_router.get("/sessions", response_class=HTMLResponse)
-def sessions_page(request: Request, load: str = ""):
-    sessions = list_sessions()
-    blocks = list_blocks()
-
-    loaded = {
-        "title": "",
-        "summary": "",
-        "tags": "",
-        "intensity": "",
-        "plan_json": json.dumps({"plan": []}, indent=2, ensure_ascii=False),
-    }
-
-    if load.strip():
-        try:
-            plan = load_session_plan(load.strip())
-            loaded["title"] = load.strip()
-            loaded["plan_json"] = json.dumps(plan, indent=2, ensure_ascii=False)
-
-            meta = next((s for s in sessions if s["title"] == loaded["title"]), None)
-            if meta:
-                loaded["summary"] = meta.get("summary") or ""
-                loaded["tags"] = ", ".join(meta.get("tags") or [])
-                loaded["intensity"] = "" if meta.get("intensity") is None else str(meta["intensity"])
-        except Exception:
-            pass
-
-    return templates.TemplateResponse(
-        "sessions.html",
-        {
-            "request": request,
-            "sessions": sessions,
-            "blocks": blocks,
-            "loaded": loaded,
-        },
-    )
-
 @app.get("/admin/blocks/page", response_class=HTMLResponse)
 def blocks_page(request: Request):
     return templates.TemplateResponse(
         "blocks.html",
         {"request": request, "blocks": list_blocks()},
     )
-
-@admin_router.post("/sessions/preview")
-def sessions_preview(plan_json: str = Form(...)):
-    try:
-        plan_obj = json.loads(plan_json)
-    except Exception as e:
-        return PlainTextResponse(f"Invalid JSON: {e}", status_code=400)
-
-    try:
-        steps, chosen_blocks = compile_plan_to_steps(plan_obj)
-    except KeyError as e:
-        return PlainTextResponse(str(e), status_code=404)
-    except Exception as e:
-        return PlainTextResponse(f"Compile failed: {e}", status_code=400)
-
-    return PlainTextResponse(
-        "OK\n"
-        f"steps={len(steps)}\n"
-        f"blocks_used={len(chosen_blocks)}\n"
-        f"first_blocks={chosen_blocks[:8]}\n\n"
-        "first_10_steps:\n"
-        + json.dumps(steps[:10], indent=2, ensure_ascii=False)
-    )
-
-@admin_router.post("/sessions/save")
-def sessions_save(
-    title: str = Form(...),
-    summary: str = Form(""),
-    tags: str = Form(""),
-    intensity: str = Form(""),
-    plan_json: str = Form(...),
-    overwrite: str = Form("0"),
-):
-    overwrite_flag = overwrite.strip().lower() in ("1", "true", "yes", "on")
-
-    try:
-        plan_obj = json.loads(plan_json)
-    except Exception as e:
-        return PlainTextResponse(f"Invalid JSON: {e}", status_code=400)
-
-    try:
-        computed_tags, computed_intensity = compute_session_meta_from_plan(plan_obj)
-    except KeyError as e:
-        return PlainTextResponse(str(e), status_code=404)
-    except Exception as e:
-        return PlainTextResponse(f"Meta compute failed: {e}", status_code=400)
-
-    try:
-        upsert_session(
-            title=title,
-            summary=summary,
-            tags=computed_tags,
-            intensity=computed_intensity,
-            plan=plan_obj,
-            overwrite=overwrite_flag,
-        )
-    except HTTPException as e:
-        return PlainTextResponse(str(e.detail), status_code=e.status_code)
-    except Exception as e:
-        return PlainTextResponse(f"Save failed: {e}", status_code=400)
-
-    return PlainTextResponse(f"Saved session: {title}")
 
 @app.get("/device/{device_id}/session_progress", response_class=HTMLResponse)
 def session_progress_fragment(device_id: str):
