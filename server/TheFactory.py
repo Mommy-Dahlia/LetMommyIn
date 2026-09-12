@@ -2,6 +2,7 @@ import csv
 import random
 import re
 import json
+from pathlib import Path
 
 # --- HARD CODE THESE IF YOU WANT ---
 CSV_PATH = "images.csv"
@@ -271,63 +272,83 @@ def extract_delays(script_lines):
 
     return cleaned_lines, delays
 
+_hw_images: list[dict] | None = None
 
-def assign_images(script_lines, images):
-    """
-    Replace #PIC lines with selected image URLs.
-    Uses tag specificity priority — more tags first.
-    Ensures no image repeats.
+def load_standard_images(content_roots) -> list[dict]:
+    for root in content_roots:
+        candidate = root / "images.csv"
+        if candidate.exists():
+            return load_images(str(candidate))
+    return []
 
-    Note: #INV lines are not changed here.
-    """
+def load_hw_images(content_roots) -> list[dict]:
+    global _hw_images
+    if _hw_images is not None:
+        return _hw_images
+    for root in content_roots:
+        candidate = root / "HW.csv"
+        if candidate.exists():
+            _hw_images = load_images(str(candidate))
+            return _hw_images
+    _hw_images = []
+    return _hw_images
 
-    # Store results but keep structure
-    processed = [None] * len(script_lines)
+def replace_pic_in_steps(steps: list[dict], content_roots: list[Path], hw_mode: bool = False) -> list[dict]:
+    if hw_mode:
+        all_images = load_hw_images(content_roots)
+    else:
+        all_images = load_standard_images(content_roots)
 
-    # Gather PIC requests
+    if not all_images:
+        return steps
+
+    # First pass: gather all PIC requests with their indices and tags
     pic_requests = []
-    for idx, line in enumerate(script_lines):
-        if PIC_PATTERN.match(line.strip()):
-            tags = extract_pic_tags(line)
-            pic_requests.append((idx, tags))
+    for i, step in enumerate(steps):
+        body = step.get("body", "")
+        if isinstance(body, str) and PIC_PATTERN.match(body.strip()):
+            tags = extract_pic_tags(body)
+            pic_requests.append((i, tags))
 
-    # Sort PICs: more tags first (higher specificity)
+    # Sort by specificity: more tags first get first pick
     pic_requests.sort(key=lambda x: len(x[1]), reverse=True)
 
-    unused_images = images.copy()
+    # Track unused images for no-repeat within this session
+    unused = list(all_images)
 
-    def eligible_images(request_tags):
-        """Return all unused images matching ALL requested tags."""
-        return [
-            img for img in unused_images
-            if request_tags.issubset(img["tags"])
-        ]
-
+    # Resolve each PIC request
+    resolved = {}
     for idx, tags in pic_requests:
         if tags:
-            candidates = eligible_images(tags)
+            candidates = [img for img in unused if tags.issubset(img["tags"])]
         else:
-            # If no tags requested, any unused image is fine
-            candidates = unused_images
+            candidates = unused
 
         if not candidates:
-            raise ValueError(
-                f"No available images left that match tags {tags}. "
-                "You may need more or differently tagged images in the CSV."
-            )
+            # Fall back to full pool if we've exhausted unused
+            candidates = [img for img in all_images if tags.issubset(img["tags"])] if tags else list(all_images)
 
-        img = random.choice(candidates)
+        if not candidates:
+            continue
 
-        processed[idx] = img["url"]  # assign URL
-        # Remove chosen image from unused set
-        unused_images = [i for i in unused_images if i["url"] != img["url"]]
+        pick = random.choice(candidates)
+        resolved[idx] = pick["url"]
+        unused = [img for img in unused if img["url"] != pick["url"]]
 
-    # Fill non-PIC lines (including #INV and normal text)
-    for idx, line in enumerate(script_lines):
-        if processed[idx] is None:
-            processed[idx] = line
+    # Second pass: build output
+    out = []
+    for i, step in enumerate(steps):
+        step = dict(step)
 
-    return processed
+        if i in resolved:
+            step["type"] = "image_popup"
+            step["body"] = resolved[i]
+
+        elif isinstance(step.get("body"), list):
+            step["body"] = replace_pic_in_steps(step["body"], content_roots, hw_mode)
+
+        out.append(step)
+    return out
 
 
 def wrap_output(lines, delays):
@@ -470,32 +491,3 @@ def apply_effect_scoping(steps: list[dict]) -> list[dict]:
         out.append({"type": "audio_stop", "timer_s": 0})
 
     return out
-
-def write_plan_json(steps, path):
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(steps, f, indent=2)
-
-def main():
-    images = load_images(CSV_PATH)
-    raw_script_lines = load_script(TXT_PATH)
-
-    # 1) Extract per-line delays from trailing #N, clean the lines
-    script_lines, delays = extract_delays(raw_script_lines)
-
-    # 2) Replace #PIC lines with URLs, honoring tags
-    processed = assign_images(script_lines, images)
-    
-    #processed = replace_pns_per_occurrence(processed, PNS_POOL)
-    
-    # 3) Wrap in JS commands, using the previously extracted delays
-    wrapped = wrap_output(processed, delays)
-    ensure_timer_s_everywhere(wrapped)
-    ensure_default_audio(wrapped)
-    ensure_default_gif_overlay(wrapped)
-    wrapped = apply_effect_scoping(wrapped)
-    write_plan_json(wrapped, OUTPUT_PATH)
-    print(f"Finished! Output written to {OUTPUT_PATH}")
-
-
-if __name__ == "__main__":
-    main()
