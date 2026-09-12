@@ -2022,6 +2022,10 @@ async def session_start_htmx(
             return PlainTextResponse(f"Step {i} must be an object.", status_code=400)
         if "type" not in step:
             return PlainTextResponse(f"Step {i} missing 'type'.", status_code=400)
+        
+    dev_info = hub.devices.get(device_id)
+    if dev_info and dev_info.version == "Mobile":
+        steps = TheFactory.replace_pic_in_steps(steps, [Path(".")])
 
     cmd_id = f"cmd_{uuid.uuid4().hex[:10]}"
     session_id = f"sess_{uuid.uuid4().hex[:10]}"
@@ -2059,6 +2063,10 @@ async def session_start_saved_htmx(
         return PlainTextResponse(f"Unknown session: {session_title}", status_code=404)
     except Exception as e:
         return PlainTextResponse(f"Compile failed: {e}", status_code=400)
+    
+    dev_info = hub.devices.get(device_id)
+    if dev_info and dev_info.version == "Mobile":
+        steps = TheFactory.replace_pic_in_steps(steps, [Path(".")])
 
     cmd_id = f"cmd_{uuid.uuid4().hex[:10]}"
     session_id = f"sess_{uuid.uuid4().hex[:10]}"
@@ -2328,6 +2336,10 @@ async def sessiongen_send(
         return PlainTextResponse("Device is offline (no active connection).", status_code=409)
 
     steps = compile_script_to_steps(script_text)
+    
+    dev_info = hub.devices.get(device_id)
+    if dev_info and dev_info.version == "Mobile":
+        steps = TheFactory.replace_pic_in_steps(steps, [Path(".")])
 
     cmd_id = f"cmd_{uuid.uuid4().hex[:10]}"
     session_id = f"sess_{uuid.uuid4().hex[:10]}"
