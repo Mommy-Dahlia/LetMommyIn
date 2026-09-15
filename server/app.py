@@ -21,7 +21,7 @@ import TheFactory
 import logging
 import sys
 
-from fastapi import FastAPI, APIRouter, Request, WebSocket, WebSocketDisconnect, HTTPException, Form, UploadFile, File, Body
+from fastapi import FastAPI, APIRouter, Request, WebSocket, WebSocketDisconnect, HTTPException, Form, UploadFile, File, Body, Depends
 from fastapi.responses import HTMLResponse, PlainTextResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -159,9 +159,22 @@ def init_db() -> None:
                          UNIQUE(name, behavior_type)
                          );
                      """)
+                     
+        conn.execute("""
+                     CREATE TABLE IF NOT EXISTS device_sessions (
+                         device_id TEXT NOT NULL,
+                         session_title TEXT NOT NULL,
+                         plan_json TEXT NOT NULL,
+                         compiled_json TEXT,
+                         meta_json TEXT DEFAULT '{}',
+                         created_at INTEGER NOT NULL,
+                         PRIMARY KEY (device_id, session_title)
+                         )
+                     """)
         
         _try_alter(conn, "ALTER TABLE devices ADD COLUMN tier TEXT NOT NULL DEFAULT 'free';")
         _try_alter(conn, "ALTER TABLE broadcast_catalogue_behaviors ADD COLUMN tags_json TEXT NOT NULL DEFAULT '[]';")
+        _try_alter(conn, "ALTER TABLE devices ADD COLUMN recovery_hash TEXT;")
 
         conn.commit()
 
@@ -171,9 +184,9 @@ init_db()
 app = FastAPI(title="Command Hub PoC")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://affirmations.letmommyin.com"],
-    allow_methods=["GET"],
-    allow_headers=["X-API-Key"],
+    allow_origins=["*"],
+    allow_methods=["GET", "POST"],
+    allow_headers=["X-API-Key", "X-Device-Token", "Content-Type"],
 )
 admin_router = APIRouter(prefix="/admin")
 
@@ -337,6 +350,33 @@ def get_session_meta_by_title(title: str) -> dict | None:
         "tags": tags if isinstance(tags, list) else [],
         "intensity": row["intensity"],
         "plan": plan,
+    }
+
+def get_block_meta_by_title(title: str) -> dict | None:
+    title = (title or "").strip()
+    if not title:
+        return None
+
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT title, summary, tags_json, intensity FROM blocks WHERE title = ?",
+            (title,),
+        ).fetchone()
+
+    if not row:
+        return None
+
+    try:
+        tags = json.loads(row["tags_json"] or "[]")
+    except Exception:
+        tags = []
+
+    return {
+        "title": row["title"],
+        "summary": row["summary"] or "",
+        "tags": tags if isinstance(tags, list) else [],
+        "intensity": row["intensity"],
     }
 
 def list_sessions() -> list[dict]:
@@ -610,6 +650,53 @@ async def push_or_queue_session_with_blocks(device_id: str, session_title: str) 
     
 SESSION_TAG_EXCLUDE = {"induction", "deepener", "training", "dream", "ending"}
 
+async def _inject_session_for_mobile(device_id: str, session_title: str) -> None:
+    """
+    For mobile clients: compile the session, store in device_sessions,
+    then notify the device to refresh its library.
+    """
+    # Load and compile
+    try:
+        plan = load_session_plan(session_title)
+        steps, chosen_blocks = compile_plan_to_steps(plan)
+    except Exception as e:
+        logger.warning("inject compile failed for %s: %s", session_title, e)
+        return
+
+    # Resolve #PIC
+    try:
+        steps = TheFactory.replace_pic_in_steps(steps, [Path(".")])
+    except Exception as e:
+        logger.warning("replace_pic_in_steps failed: %s", e)
+
+    # Build metadata
+    meta = get_session_meta_by_title(session_title) or {}
+    meta["blocks"] = chosen_blocks
+
+    # Store in device_sessions
+    now = int(time.time())
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("""
+            INSERT OR REPLACE INTO device_sessions
+            (device_id, session_title, plan_json, compiled_json, meta_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (
+            device_id,
+            session_title,
+            json.dumps(meta.get("plan", {})),
+            json.dumps(steps),
+            json.dumps(meta),
+            now,
+        ))
+        conn.commit()
+
+    # Notify the device to refresh its session list
+    notify_payload = {
+        "type": "inject_session",
+        "title": session_title,
+    }
+    await push_or_queue_injection(device_id=device_id, payload=notify_payload)
+
 def compute_session_meta_from_plan(plan: dict) -> tuple[list[str], int | None]:
     """
     Returns (tags, intensity_max) based on blocks referenced in the plan.
@@ -709,6 +796,17 @@ def catalogue_upsert_block(title: str, audience: str, payload: dict) -> None:
             updated_at=excluded.updated_at
         """, (title, audience, _json_dumps(payload), now))
         conn.commit()
+        
+def get_catalogue_sessions_for_tier(tier: str) -> list[dict]:
+    audiences = ["all", "paid"] if tier == "paid" else ["all"]
+    placeholders = ",".join("?" * len(audiences))
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute(f"""
+            SELECT title, updated_at FROM broadcast_catalogue_sessions
+            WHERE audience IN ({placeholders})
+            ORDER BY title COLLATE NOCASE
+        """, audiences).fetchall()
+    return [{"title": r[0], "updated_at": r[1], "source": "catalogue"} for r in rows]
             
 def get_catalogue_manifest(tier: str) -> dict:
     audiences = ["all", "paid"] if tier == "paid" else ["all"]
@@ -1572,19 +1670,23 @@ def device_exists(device_id: str) -> bool:
         return row is not None
 
 
-def create_device(device_id: str, device_token: str, username: str | None, device_name: str | None) -> None:
+def create_device(device_id: str, device_token: str, username: str | None, device_name: str | None) -> str:
     now = int(time.time())
     token_hash = sha256_hex(device_token)
+    recovery_code = secrets.token_urlsafe(16).rstrip("=")
+    recovery_hash = sha256_hex(recovery_code)
 
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute(
             """
-            INSERT INTO devices (device_id, token_hash, created_at, last_seen, username, device_name)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO devices (device_id, token_hash, recovery_hash, created_at, last_seen, username, device_name)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (device_id, token_hash, now, now, username, device_name),
+            (device_id, token_hash, recovery_hash, now, now, username, device_name),
         )
         conn.commit()
+
+    return recovery_code
 
 
 def update_device_metadata(device_id: str, username: str | None, device_name: str | None, *, allow_identity_change=False):
@@ -1635,10 +1737,227 @@ def require_paid(device_id: str) -> None:
         # 402 is “Payment Required” (rarely used, but semantically correct).
         # 403 is also reasonable. Pick one and stay consistent.
         raise HTTPException(status_code=402, detail="This feature requires a paid tier.")
+        
+async def require_device_token(request: Request) -> str:
+    token = request.headers.get("X-Device-Token", "")
+    device_id = get_device_id_for_token(token)
+    if not device_id:
+        raise HTTPException(status_code=401, detail="invalid device token")
+    return device_id
 
 @app.get("/health")
 def health():
     return {"ok": True, "ts": time.time()}
+
+@app.get("/api/blocks")
+async def api_list_blocks(
+    device_id: str = Depends(require_device_token),
+):
+    require_paid(device_id)
+
+    tier = get_device_tier(device_id)
+    audiences = ["all", "paid"] if tier == "paid" else ["all"]
+    placeholders = ",".join("?" * len(audiences))
+
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute(f"""
+            SELECT title, updated_at FROM broadcast_catalogue_blocks
+            WHERE audience IN ({placeholders})
+            ORDER BY title COLLATE NOCASE
+        """, audiences).fetchall()
+
+    blocks = []
+    for r in rows:
+        # Load block metadata
+        meta = get_block_meta_by_title(r[0])
+        blocks.append({
+            "title": r[0],
+            "summary": meta.get("summary", "") if meta else "",
+            "tags": meta.get("tags", []) if meta else [],
+            "intensity": meta.get("intensity", None) if meta else None,
+        })
+
+    return JSONResponse({"blocks": blocks})
+
+@app.get("/api/sessions")
+async def api_list_sessions(
+    device_id: str = Depends(require_device_token),
+):
+    tier = get_device_tier(device_id)
+    catalogue = get_catalogue_sessions_for_tier(tier)
+
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute(
+            "SELECT session_title, meta_json, created_at FROM device_sessions WHERE device_id = ?",
+            (device_id,),
+        ).fetchall()
+
+    device_sessions = []
+    for r in rows:
+        meta = json.loads(r[1]) if r[1] else {}
+        device_sessions.append({
+            "title": meta.get("title", r[0]),
+            "summary": meta.get("summary", ""),
+            "tags": meta.get("tags", []),
+            "intensity": meta.get("intensity", None),
+            "source": "device",
+            "created_at": r[2],
+        })
+
+    return JSONResponse({
+        "catalogue": catalogue,
+        "device_sessions": device_sessions,
+    })
+
+@app.post("/api/sessions/compile")
+async def api_compile_session(
+    request: Request,
+    device_id: str = Depends(require_device_token),
+):
+    body = await request.json()
+    session_title = (body.get("title") or "").strip()
+    source = (body.get("source") or "catalogue").strip()
+    if not session_title:
+        raise HTTPException(status_code=400, detail="title is required")
+
+    if source == "device":
+        # Load from device_sessions table
+        with sqlite3.connect(DB_PATH) as conn:
+            row = conn.execute(
+                "SELECT compiled_json, meta_json FROM device_sessions WHERE device_id = ? AND session_title = ?",
+                (device_id, session_title),
+            ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail=f"Unknown device session: {session_title}")
+
+        steps = json.loads(row[0])
+        meta = json.loads(row[1]) if row[1] else {}
+        chosen_blocks = meta.get("blocks", [])
+    else:
+        # Catalogue session — existing logic
+        try:
+            plan = load_session_plan(session_title)
+            steps, chosen_blocks = compile_plan_to_steps(plan)
+        except KeyError:
+            raise HTTPException(status_code=404, detail=f"Unknown session: {session_title}")
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Compile failed: {e}")
+
+        meta = get_session_meta_by_title(session_title) or {}
+
+    # Resolve #PIC for mobile clients
+    dev_info = hub.devices.get(device_id)
+    if dev_info and dev_info.version == "Mobile":
+        try:
+            steps = TheFactory.replace_pic_in_steps(steps, [Path(".")])
+        except Exception as e:
+            logger.warning("replace_pic_in_steps failed: %s", e)
+
+    return JSONResponse({
+        "steps": steps,
+        "title": meta.get("title", session_title),
+        "summary": meta.get("summary", ""),
+        "tags": meta.get("tags", []),
+        "intensity": meta.get("intensity", None),
+        "blocks": chosen_blocks,
+    })
+
+@app.post("/api/sessions/custom/save")
+async def api_save_custom_session(
+    request: Request,
+    device_id: str = Depends(require_device_token),
+):
+    require_paid(device_id)
+
+    body = await request.json()
+    session_name = (body.get("name") or "").strip()
+    plan = body.get("plan")
+
+    if not session_name:
+        raise HTTPException(status_code=400, detail="name is required")
+    if not plan or not isinstance(plan, list):
+        raise HTTPException(status_code=400, detail="plan must be a non-empty list")
+
+    # Compile the plan
+    try:
+        plan_obj = {"plan": plan}
+        steps, chosen_blocks = compile_plan_to_steps(plan_obj)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Compile failed: {e}")
+
+    # Resolve #PIC for mobile
+    dev_info = hub.devices.get(device_id)
+    if dev_info and dev_info.version == "Mobile":
+        try:
+            steps = TheFactory.replace_pic_in_steps(steps, [Path(".")])
+        except Exception as e:
+            logger.warning("replace_pic_in_steps failed: %s", e)
+
+    meta = {
+        "title": session_name,
+        "summary": f"Custom session ({len(chosen_blocks)} blocks)",
+        "tags": [],
+        "intensity": None,
+        "blocks": chosen_blocks,
+    }
+
+    now = int(time.time())
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("""
+            INSERT OR REPLACE INTO device_sessions
+            (device_id, session_title, plan_json, compiled_json, meta_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (
+            device_id,
+            session_name,
+            json.dumps({"plan": plan}),
+            json.dumps(steps),
+            json.dumps(meta),
+            now,
+        ))
+        conn.commit()
+
+    return JSONResponse({"status": "saved", "title": session_name})
+
+@app.post("/api/recover")
+async def api_recover(request: Request):
+    body = await request.json()
+    recovery_code = (body.get("recovery_code") or "").strip()
+    if not recovery_code:
+        raise HTTPException(status_code=400, detail="recovery_code is required")
+
+    code_hash = sha256_hex(recovery_code)
+
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            "SELECT device_id, username, tier FROM devices WHERE recovery_hash = ?",
+            (code_hash,),
+        ).fetchone()
+
+    if not row:
+        raise HTTPException(status_code=401, detail="invalid recovery code")
+
+    device_id = row[0]
+    username = row[1]
+    tier = row[2] or "free"
+
+    # Generate new token
+    new_token = secrets.token_urlsafe(32)
+    new_hash = sha256_hex(new_token)
+
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            "UPDATE devices SET token_hash = ? WHERE device_id = ?",
+            (new_hash, device_id),
+        )
+        conn.commit()
+
+    return JSONResponse({
+        "device_token": new_token,
+        "device_id": device_id,
+        "username": username,
+        "tier": tier,
+    })
 
 @app.get("/affirmations")
 def get_affirmations(request: Request):
@@ -2373,7 +2692,15 @@ async def inject_block_to_device(device_id: str, block_title: str = Form(...)):
 
 @app.post("/device/{device_id}/inject/session")
 async def inject_session_to_device(device_id: str, session_title: str = Form(...)):
-    await push_or_queue_session_with_blocks(device_id, session_title.strip())
+    session_title = session_title.strip()
+
+    # Check if target is mobile
+    dev_info = hub.devices.get(device_id)
+    if dev_info and dev_info.version == "Mobile":
+        await _inject_session_for_mobile(device_id, session_title)
+    else:
+        await push_or_queue_session_with_blocks(device_id, session_title)
+        
     return PlainTextResponse("OK inject_session (+blocks) → device")
 
 @app.post("/inject/block")
@@ -2400,13 +2727,18 @@ async def inject_session_broadcast(
     device_ids: str = Form(""),
 ):
     targets = resolve_target_device_ids(target=target, device_ids_csv=device_ids)
-    payload = build_inject_session_payload(session_title.strip())
+    session_title = session_title.strip()
 
     if target.strip().lower() in ("all", "paid"):
-        catalogue_upsert_session(session_title.strip(), target.strip().lower(), payload)
+        payload = build_inject_session_payload(session_title)
+        catalogue_upsert_session(session_title, target.strip().lower(), payload)
 
     for did in targets:
-        await push_or_queue_session_with_blocks(did, session_title.strip())
+        dev_info = hub.devices.get(did)
+        if dev_info and dev_info.version == "Mobile":
+            await _inject_session_for_mobile(did, session_title)
+        else:
+            await push_or_queue_session_with_blocks(did, session_title)
 
     return PlainTextResponse(f"OK inject_session -> {len(targets)} target(s)")
 
@@ -2481,7 +2813,7 @@ async def ws_endpoint(ws: WebSocket):
                 return
 
             new_token = generate_device_token()
-            create_device(
+            recovery_code = create_device(
                 device_id=device_id,
                 device_token=new_token,
                 username=username,
@@ -2491,6 +2823,7 @@ async def ws_endpoint(ws: WebSocket):
             await ws.send_text(json.dumps({
                 "type": "enroll_ok",
                 "device_token": new_token,
+                "recovery_code": recovery_code,
             }))
             update_device_metadata(device_id, username=username, device_name=device_name,allow_identity_change=True)
         else:
