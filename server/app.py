@@ -648,6 +648,7 @@ async def push_or_queue_session_with_blocks(device_id: str, session_title: str) 
     # 3) Then inject the session itself
     payload_session = build_inject_session_payload(session_title)
     await push_or_queue_injection(device_id=device_id, payload=payload_session)
+    send_push_notification(device_id, "Session Injected", f"Mommy sent you a new session: {session_title}")
     
 SESSION_TAG_EXCLUDE = {"induction", "deepener", "training", "dream", "ending"}
 
@@ -741,6 +742,7 @@ async def _inject_session_for_mobile(device_id: str, session_title: str) -> None
         "title": session_title,
     }
     await push_or_queue_injection(device_id=device_id, payload=notify_payload)
+    send_push_notification(device_id, "Session Injected", f"Mommy sent you a new session: {session_title}")
 
 def compute_session_meta_from_plan(plan: dict) -> tuple[list[str], int | None]:
     """
@@ -2915,6 +2917,16 @@ async def ws_endpoint(ws: WebSocket):
                 }))
                 hub.update_last_seen(device_id)
                 update_device_metadata(device_id, None, None)
+            elif mtype == "register_push_token":
+                push_token = str(msg.get("push_token", "")).strip()
+                if push_token and device_id:
+                    with sqlite3.connect(DB_PATH) as conn:
+                        conn.execute(
+                            "UPDATE devices SET push_token = ? WHERE device_id = ?",
+                            (push_token, device_id),
+                        )
+                        conn.commit()
+                    logger.info("Stored push_token for device_id=%s", device_id)
             elif mtype == "ack":
                 hub.handle_ack(device_id, msg)
             elif mtype == "catalogue_sync":
