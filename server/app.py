@@ -175,6 +175,7 @@ def init_db() -> None:
         _try_alter(conn, "ALTER TABLE devices ADD COLUMN tier TEXT NOT NULL DEFAULT 'free';")
         _try_alter(conn, "ALTER TABLE broadcast_catalogue_behaviors ADD COLUMN tags_json TEXT NOT NULL DEFAULT '[]';")
         _try_alter(conn, "ALTER TABLE devices ADD COLUMN recovery_hash TEXT;")
+        _try_alter(conn, "ALTER TABLE devices ADD COLUMN push_token TEXT;")
 
         conn.commit()
 
@@ -649,6 +650,50 @@ async def push_or_queue_session_with_blocks(device_id: str, session_title: str) 
     await push_or_queue_injection(device_id=device_id, payload=payload_session)
     
 SESSION_TAG_EXCLUDE = {"induction", "deepener", "training", "dream", "ending"}
+
+def send_push_notification(device_id: str, title: str, body: str) -> None:
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            "SELECT push_token FROM devices WHERE device_id = ?",
+            (device_id,),
+        ).fetchone()
+
+    if not row or not row[0]:
+        return
+
+    push_token = row[0]
+
+    try:
+        import google.auth.transport.requests
+        from google.oauth2 import service_account
+
+        credentials = service_account.Credentials.from_service_account_file(
+            'firebase-service-account.json',
+            scopes=['https://www.googleapis.com/auth/firebase.messaging'],
+        )
+        credentials.refresh(google.auth.transport.requests.Request())
+
+        import requests as http_requests
+        response = http_requests.post(
+            'https://fcm.googleapis.com/v1/projects/lmi-mobile/messages:send',
+            headers={
+                'Authorization': f'Bearer {credentials.token}',
+                'Content-Type': 'application/json',
+            },
+            json={
+                'message': {
+                    'token': push_token,
+                    'notification': {
+                        'title': title,
+                        'body': body,
+                    },
+                },
+            },
+        )
+        if response.status_code != 200:
+            logger.warning("FCM send failed: %s %s", response.status_code, response.text)
+    except Exception as e:
+        logger.warning("FCM send error: %s", e)
 
 async def _inject_session_for_mobile(device_id: str, session_title: str) -> None:
     """
