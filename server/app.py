@@ -176,6 +176,7 @@ def init_db() -> None:
         _try_alter(conn, "ALTER TABLE broadcast_catalogue_behaviors ADD COLUMN tags_json TEXT NOT NULL DEFAULT '[]';")
         _try_alter(conn, "ALTER TABLE devices ADD COLUMN recovery_hash TEXT;")
         _try_alter(conn, "ALTER TABLE devices ADD COLUMN push_token TEXT;")
+        _try_alter(conn, "ALTER TABLE devices ADD COLUMN version TEXT DEFAULT '';")
 
         conn.commit()
 
@@ -1668,6 +1669,47 @@ def sessions_preview(plan_json: str = Form(...)):
         + json.dumps(steps[:10], indent=2, ensure_ascii=False)
     )
 
+@app.post("/device/{device_id}/regenerate_recovery")
+async def regenerate_recovery(device_id: str):
+    import secrets as _secrets
+    new_code = _secrets.token_urlsafe(16).rstrip("=")
+    new_hash = sha256_hex(new_code)
+
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            "UPDATE devices SET recovery_hash = ? WHERE device_id = ?",
+            (new_hash, device_id),
+        )
+        conn.commit()
+
+    return PlainTextResponse(f"New recovery code: {new_code}")
+
+@admin_router.post("/regenerate_recovery_by_username")
+async def regenerate_recovery_by_username(username: str = Form(...)):
+    import secrets as _secrets
+
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            "SELECT device_id FROM devices WHERE username = ? AND version = 'Mobile'",
+            (username.strip(),),
+        ).fetchone()
+
+    if not row:
+        return PlainTextResponse(f"No mobile device found for username: {username}")
+
+    device_id = row[0]
+    new_code = _secrets.token_urlsafe(16).rstrip("=")
+    new_hash = sha256_hex(new_code)
+
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            "UPDATE devices SET recovery_hash = ? WHERE device_id = ?",
+            (new_hash, device_id),
+        )
+        conn.commit()
+
+    return PlainTextResponse(f"Recovery code for {username} (mobile): {new_code}")
+
 app.include_router(admin_router)
 
 def consume_enroll_code(raw_code: str) -> bool:
@@ -1736,22 +1778,22 @@ def create_device(device_id: str, device_token: str, username: str | None, devic
     return recovery_code
 
 
-def update_device_metadata(device_id: str, username: str | None, device_name: str | None, *, allow_identity_change=False):
+def update_device_metadata(device_id: str, username: str | None, device_name: str | None, *, allow_identity_change=False, version: str | None = None):
     now = int(time.time())
     with sqlite3.connect(DB_PATH) as conn:
         if allow_identity_change:
             conn.execute(
                 """
                 UPDATE devices
-                SET last_seen = ?, username = COALESCE(?, username), device_name = COALESCE(?, device_name)
+                SET last_seen = ?, username = COALESCE(?, username), device_name = COALESCE(?, device_name), version = COALESCE(?, version)
                 WHERE device_id = ?
                 """,
-                (now, username, device_name, device_id),
+                (now, username, device_name, version, device_id),
             )
         else:
             conn.execute(
-                "UPDATE devices SET last_seen = ? WHERE device_id = ?",
-                (now, device_id),
+                "UPDATE devices SET last_seen = ?, version = COALESCE(?, version) WHERE device_id = ?",
+                (now, version, device_id),
             )
         conn.commit()
 
@@ -2872,9 +2914,9 @@ async def ws_endpoint(ws: WebSocket):
                 "device_token": new_token,
                 "recovery_code": recovery_code,
             }))
-            update_device_metadata(device_id, username=username, device_name=device_name,allow_identity_change=True)
+            update_device_metadata(device_id, username=username, device_name=device_name,version=version,allow_identity_change=True)
         else:
-            update_device_metadata(device_id, username=username, device_name=device_name)
+            update_device_metadata(device_id, username=username, device_name=device_name,version=version)
 
         
         

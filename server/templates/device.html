@@ -50,6 +50,16 @@
 
     <div id="tier-result" style="margin-top: 8px;"></div>
 
+    <h2>Recovery Code</h2>
+    <form
+      hx-post="/device/{{ device.device_id }}/regenerate_recovery"
+      hx-target="#recovery-result"
+      hx-swap="innerHTML"
+    >
+      <button type="submit">Regenerate Recovery Code</button>
+    </form>
+    <pre id="recovery-result" style="white-space: pre-wrap;"></pre>
+
     <h2>Send Message</h2>
 
     <form

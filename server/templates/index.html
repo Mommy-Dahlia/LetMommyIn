@@ -66,6 +66,20 @@
     </form>
 
     <pre id="broadcast_result" style="white-space: pre-wrap;"></pre>
+
+    <h2>Regenerate Recovery Code</h2>
+    <form
+      hx-post="/admin/regenerate_recovery_by_username"
+      hx-target="#recovery-result"
+      hx-swap="innerHTML"
+    >
+      <label>Username:
+        <input name="username" required placeholder="username" />
+      </label>
+      <button type="submit">Regenerate</button>
+    </form>
+    <pre id="recovery-result" style="white-space: pre-wrap;"></pre>
+
     <h1>Devices</h1>
 
     <table border="1" cellpadding="6" cellspacing="0">
